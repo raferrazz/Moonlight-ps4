@@ -1,7 +1,7 @@
 #pragma once
 #include "ui_draw.h"
 
-#define UI_THEME_COUNT 5
+#define UI_THEME_COUNT 6
 typedef struct {
     const char *name;
     uint32_t bg, panel, selected, accent, text, dim, warn, horizon;

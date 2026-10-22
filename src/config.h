@@ -24,7 +24,18 @@ typedef struct {
     bool enable_file_log; // writes /data/moonlight/debug.log
     bool show_stats; // on-screen perf overlay (FPS/decode/convert/present/KB per frame)
     bool paired_ok; // runtime only
+    bool autostart; // boot straight into app_name (set with SQUARE on a game)
     int ui_theme; // Midnight, Mono, Blue Wave, Daylight, Cinema (0..4)
+
+    /* Feature additions. */
+    char wol_mac[24];      // "AA:BB:CC:DD:EE:FF"; empty = Wake-on-LAN off
+    bool wol_auto;         // wol_mac came from the host's serverinfo
+                           // (shows "(auto)" in Settings; manual edit clears)
+    bool surround51;       // request 5.1 audio from the host (opt-in; falls
+                           // back to a stereo downmix if 8ch output fails)
+    bool touchpad_mouse;   // DS4 touchpad acts as a mouse (click=L, 2-finger=R)
+    bool gyro_motion;      // forward DS4 gyro/accel to the host when a
+                           // game asks (toggle; off = no motion caps announced)
 
     /* Videodec2 tuning, A/B-able on console without a rebuild. Rev-2 defaults
      * (depth=2 + AU ONION) are the fast path; files with cfg_rev < 2 get them

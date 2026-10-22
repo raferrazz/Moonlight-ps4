@@ -8,6 +8,9 @@ static const ui_theme_t themes[UI_THEME_COUNT] = {
     {"Blue Wave", 0xFF061B50, 0xFF102E68, 0xFF1C509C, 0xFF9AE9FF, 0xFFF5FAFF, 0xFFBDD0EB, 0xFFFFD07C, 0xFF0E3984},
     {"Daylight", 0xFFF3F0EA, 0xFFE6E3DD, 0xFFD8E5F3, 0xFF326CAE, 0xFF202B39, 0xFF526170, 0xFF92530A, 0xFFFAF8F4},
     {"Cinema", 0xFF101B20, 0xFF1B2D32, 0xFF234950, 0xFF4BDBD7, 0xFFEFF6F6, 0xFFA8BEC3, 0xFFFFC878, 0xFF254650},
+    /* Orbis - the PS4 system look (default for new configs and migrated old ones):
+     * deep navy gradient, light-blue accent, white text. */
+    {"Orbis", 0xFF0A1424, 0xFF15263E, 0xFF1D3E66, 0xFF63B3FF, 0xFFEFF5FF, 0xFF8DA4C0, 0xFFFFC46A, 0xFF14243E},
 };
 void ui_theme_set(int index) { s_index = index >= 0 && index < UI_THEME_COUNT ? index : 0; }
 int ui_theme_index(void) { return s_index; }
@@ -58,6 +61,22 @@ void ui_theme_background(ui_surface_t *s) {
                 ui_rect(s,x,lower+layer,1,1,blend(t->horizon,0xff1b6ab8,25-layer));
         }
     }
+    if (s_index == 5) {
+        /* Orbis: two very soft light-blue arcs across the deep navy, the
+         * quiet "flow" of the PS4 home background. */
+        for (int x = 0; x < s->w; x++) {
+            int u = x * 1000 / s->w;
+            int y = 150 + u * 3 / 4 - u * u / 900 + u * u / 1000 * u / 4200;
+            for (int layer = 26; layer >= 0; layer--)
+                ui_rect(s, x, y + layer, 1, 1,
+                        blend(t->bg, 0xff4a8ed2, 6 + (26 - layer)));
+            ui_rect(s, x, y, 1, 1, blend(t->bg, 0xff63b3ff, 120));
+            int lower = s->h - 170 + u / 6 - u * u / 2400;
+            for (int layer = 18; layer >= 0; layer--)
+                ui_rect(s, x, lower + layer, 1, 1,
+                        blend(t->horizon, 0xff2a63b8, 10 - layer / 2));
+        }
+    }
 }
 void ui_theme_splash(ui_surface_t *s) {
     const ui_theme_t *t = ui_theme_current();
@@ -71,7 +90,7 @@ void ui_theme_splash(ui_surface_t *s) {
     int size=s_index==1?60:54;
     const char *title="M O O N L I G H T";
     ui_label(s,cx-ui_label_w(size,0,title)/2,530,size,0,t->text,title);
-    ui_label(s,cx-ui_label_w(32,0,"PS4")/2,615,32,0,s_index==1?t->dim:t->accent,"PS4");
+    /* "PS4" subtitle dropped - the app is just Moonlight everywhere. */
     if(s_index==3)ui_rect(s,cx-25,705,50,4,t->accent);
     ui_label(s,cx-ui_label_w(28,0,"Starting...")/2,850,28,0,t->dim,"Starting...");
 }

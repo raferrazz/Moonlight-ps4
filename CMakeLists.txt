@@ -44,6 +44,7 @@ set(GAMESTREAM_SOURCES
     src/gamestream/gs_http.c
     src/gamestream/mini_xml.c
     src/gamestream/client.c
+    src/gamestream/launch_flow.c
     src/gamestream/sps.c
 )
 
@@ -80,10 +81,12 @@ if(PS4)
         src/video/decoder_ffmpeg.c
         src/video/decoder_orbis.c
         src/input/input_pad.c
+        src/input/touch_gesture.c
         src/ui/ui_draw.c
         src/ui/ui_theme.c
         src/ui/ui_art.c
         src/ui/ui_menu.c
+        src/ui/quick_menu.c
         ${COMMON_SOURCES}
         ${GAMESTREAM_SOURCES}
     )
@@ -134,7 +137,9 @@ if(PS4)
         VERBATIM
     )
 else()
-    # Linux development CLI (pairing / video dump)
+    # Linux development CLI (pairing / video dump). It does not call FFmpeg
+    # itself (the dump callbacks write raw H.264), so the dependency is
+    # optional: link it only when the dev package is present.
     find_package(PkgConfig)
     pkg_check_modules(HOST_FFMPEG IMPORTED_TARGET libavcodec libavutil)
 
@@ -153,4 +158,7 @@ else()
         pthread
         m
     )
+    if(TARGET PkgConfig::HOST_FFMPEG)
+        target_link_libraries(moonlight-cli PRIVATE PkgConfig::HOST_FFMPEG)
+    endif()
 endif()

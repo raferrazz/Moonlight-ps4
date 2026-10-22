@@ -1,3 +1,18 @@
+The baked UI font is now Carlito (SIL Open Font License 1.1,
+by Lukasz Dziedzic with tyPoland, Google Fonts). It is baked at build
+time by scripts/generate_ui_font.py from the system font directory and
+NOT redistributed inside this repository; the SIL OFL 1.1 permits both
+use and redistribution. The license text follows. The previous bake
+used DejaVu Sans; its license is retained below.
+
+--------------------------------------------------------------------------------
+Carlito - Copyright (c) 2010-2013 by tyPoland Lukasz Dziedzic with
+Google Corporation. Licensed under the SIL Open Font License, Version 1.1.
+This license is preserved with the license's reserved font name rules:
+Carlito is NOT modified here; it is rasterized as shipped.
+
+--------------------------------------------------------------------------------
+
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: DejaVu fonts
 Upstream-Author: Stepan Roh <src@users.sourceforge.net> (original author),

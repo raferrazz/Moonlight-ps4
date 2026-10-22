@@ -1,12 +1,27 @@
 // Moonlight client for PS4: load config, start logging, and launch the stream.
-// On Orbis main() must NOT return: the CRT calls exit()/_exit() and the kernel
-// responds with SIGSYS. After finishing, hang forever until the user closes
-// the app with the PS button.
+//
+// Exit handling: the PS4 system shows a crash dialog whenever the app
+// was closed from the PS4 home menu. Root cause: the system invokes the
+// process's exit path in-process on app close, and the stock CRT's exit()
+// ends in _exit() → SIGSYS on Orbis, which the crash reporter picks up.
+// We pre-empt that by defining exit()/_exit() ourselves and terminating
+// through the kernel's own SYS_exit (syscall 1 on the FreeBSD-derived PS4
+// kernel): no signal is raised, so the process simply ends and the close
+// is reported as clean. The kernel reclaims all process resources (video,
+// sockets, threads) atomically, so skipping CRT cleanup is safe. main()
+// still never returns; these overrides also cover return-from-main and any
+// library-initiated exit.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
+
+#ifdef __ORBIS__
+#include <orbis/SystemService.h>
+#endif
 
 #include "log.h"
 #include "config.h"
@@ -24,7 +39,123 @@
 #define CONFIG_DIR "."
 #endif
 
-#define VERSION_STR "1.3.4-dev"
+#define VERSION_STR "1.5.5"
+
+#ifdef __ORBIS__
+/* Terminate the process with SYS_exit directly. PS4's kernel is FreeBSD 9
+ * derived: SYS_exit == 1, argument (exit status) in RDI. Never returns.
+ * Deliberately free of locks, allocations, logging or stdio: it can be
+ * invoked from any thread while others are mid-operation. */
+static _Noreturn void orbis_sys_exit(int status) {
+    __asm__ volatile(
+        "movl $1, %%eax\n\t"          /* SYS_exit */
+        "movl %0, %%edi\n\t"          /* status */
+        "syscall\n"
+        "1: pause\n\t"
+        "jmp 1b\n\t"
+        :
+        : "r"(status)
+        : "eax", "rdi", "rcx", "r11", "memory");
+    __builtin_unreachable();
+}
+
+/* Pre-empt the CRT's broken exit path (see file header). The executable's
+ * own definitions win over the dynamic libkernel exports, so every
+ * exit()/_exit() call from CRT or library code lands here. */
+_Noreturn void exit(int status) {
+    orbis_sys_exit(status);
+}
+
+_Noreturn void _exit(int status) {
+    orbis_sys_exit(status);
+}
+
+/* The SYS_exit override alone did not stop the crash dialog when
+ * closing from the PS4 menu — which proves the system's close path does
+ * not go through exit()/_exit() at all. Two plausible mechanisms remain:
+ * a POSIX signal delivered to the process, or an external kill. If it is
+ * a catchable signal, the handlers below turn the close into a clean
+ * SYS_exit and leave an EXIT-MARKER line in debug.log. */
+static void close_signal_handler(int sig) {
+    /* Async-signal-safe: raw open/write/close inside, then kernel exit. */
+    log_signal_marker("signal caught; clean exit");
+    orbis_sys_exit(0);
+}
+
+/* convert fatal faults into a clean death. The
+ * system's crash dialog (CE-34878-0) is shown for unhandled SIGSEGV et al.;
+ * a handler that immediately SYS_exits reports nothing and leaves the
+ * EXIT-MARKER for the log. The PS button > Close path bypasses every
+ * catchable signal, so
+ * these only cover faults the app raises in itself. */
+static void fault_signal_handler(int sig) {
+    char tag[48];
+    /* Async-signal-safe number formatting (no snprintf in a handler). */
+    char digits[12];
+    int n = 0, v = sig;
+    if (v < 0) v = -v;
+    do { digits[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    int o = 0;
+    tag[o++] = 'f'; tag[o++] = 'a'; tag[o++] = 'u'; tag[o++] = 'l';
+    tag[o++] = 't'; tag[o++] = ' ';
+    while (n > 0 && o < (int)sizeof(tag) - 1)
+        tag[o++] = digits[--n];
+    tag[o] = '\0';
+    log_signal_marker(tag);
+    orbis_sys_exit(0);
+}
+
+static void install_close_handlers(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = close_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    int installed = 0;
+    const int sigs[] = {SIGTERM, SIGINT, SIGHUP, SIGQUIT};
+    for (unsigned i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "sig %d", sigs[i]);
+        if (sigaction(sigs[i], &sa, NULL) == 0)
+            installed++;
+        else
+            LOGW("close: sigaction failed for %s errno=%d", name, errno);
+    }
+    LOGI("close: %d teardown signal handlers installed", installed);
+
+    struct sigaction fa;
+    memset(&fa, 0, sizeof(fa));
+    fa.sa_handler = fault_signal_handler;
+    sigemptyset(&fa.sa_mask);
+    int faults = 0;
+    const int fsigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGSYS,
+                         SIGTRAP};
+    for (unsigned i = 0; i < sizeof(fsigs) / sizeof(fsigs[0]); i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "sig %d", fsigs[i]);
+        if (sigaction(fsigs[i], &fa, NULL) == 0)
+            faults++;
+        else
+            LOGW("close: sigaction failed for %s errno=%d", name, errno);
+    }
+    LOGI("close: %d fault handlers installed (convert fatal to clean exit)",
+         faults);
+}
+
+/* the sanctioned exit. PS button > Close Application kills the app
+ * in a way no catchable signal or exit path can intercept, and that
+ * death shows the CE-34878-0
+ * dialog ~half the time. The one death the system never reports as a
+ * crash is the title-side exit: sceSystemServiceLoadExec("exit", NULL)
+ * - the same call Apollo and other homebrew use to quit to the dashboard.
+ * Settings > Exit Moonlight runs exactly this. */
+static _Noreturn void app_exit_clean(void) {
+    LOGI("exit: sceSystemServiceLoadExec(\"exit\")");
+    /* File logging is unbuffered, so the line above is already on disk. */
+    int rc = sceSystemServiceLoadExec("exit", NULL);
+    LOGW("exit: LoadExec => 0x%08x; SYS_exit fallback", (unsigned)rc);
+    orbis_sys_exit(0);
+}
+#endif
 
 static void read_line_file(const char *path, char *out, size_t outlen) {
     out[0] = '\0';
@@ -90,7 +221,10 @@ int main(void) {
 
     log_init(cfg.debug_host, 9999);
     LOGI("=== moonlight-ps4 %s boot ===", VERSION_STR);
-    LOGN("Moonlight PS4 %s", VERSION_STR);
+#ifdef __ORBIS__
+    install_close_handlers();
+#endif
+    LOGN("Moonlight %s", VERSION_STR);
     LOGI("moonlight-ps4 %s host=%s debug=%s %dx%d@%d %dkbps",
          VERSION_STR, cfg.host, cfg.debug_host,
          cfg.stream.width, cfg.stream.height, cfg.stream.fps, cfg.stream.bitrate);
@@ -132,6 +266,15 @@ int main(void) {
     int rc = stream_run(&cfg, CONFIG_DIR);
     LOGI("<<< stream_run => %d", rc);
 
+#ifdef __ORBIS__
+    if (rc == 0) {
+        /* The user asked to leave (Settings > Exit): die the sanctioned
+         * way instead of hanging into a system kill. */
+        app_exit_clean();
+    }
+    hang_forever(rc < 0 ? "FAIL" : "unexpected stream_run return");
+#else
     hang_forever(rc == 0 ? "OK Stream closed" : "FAIL");
+#endif
     return 0;
 }

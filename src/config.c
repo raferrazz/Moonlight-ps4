@@ -35,7 +35,7 @@ void config_set_defaults(app_config_t *cfg) {
     cfg->prefer_hw = true;
     cfg->videodec2_spike = false;
     cfg->prefer_ycbcr = false;
-    cfg->enable_file_log = false;
+    cfg->enable_file_log = true; // default ON for fresh configs; saved configs keep their value
     cfg->show_stats = false;
     cfg->dec_pipeline_depth = 2;
     cfg->dec_thread_prio = 700;
@@ -44,6 +44,13 @@ void config_set_defaults(app_config_t *cfg) {
     cfg->dec_fb_garlic = false;
     cfg->bgra_workers = 4;
     cfg->bgra_nt = -1;
+    cfg->autostart = false;
+    cfg->ui_theme = 5; /* Orbis (PS4 system look) is the default */
+    cfg->wol_mac[0] = '\0';      /* WOL off until the user sets a MAC */
+    cfg->wol_auto = false;        /* provenance flag (host vs. manual) */
+    cfg->surround51 = false;     /* stereo is the safe default on any TV/AVR */
+    cfg->touchpad_mouse = true;  /* natural for Desktop; games never touch it */
+    cfg->gyro_motion = true;     /* motion aiming works out of the box */
     snprintf(cfg->app_name, sizeof(cfg->app_name), "Steam Big Picture");
 }
 
@@ -152,10 +159,24 @@ int config_load(app_config_t *cfg, const char *dir) {
             cfg->enable_file_log = parse_bool(val);
         else if (!strcmp(key, "show_stats"))
             cfg->show_stats = parse_bool(val);
+        else if (!strcmp(key, "autostart"))
+            cfg->autostart = parse_bool(val);
         else if (!strcmp(key, "ui_theme")) {
             int theme = atoi(val);
-            cfg->ui_theme = theme >= 0 && theme < 5 ? theme : 0;
+            cfg->ui_theme = theme >= 0 && theme < 6 ? theme : 5;
         }
+        else if (!strcmp(key, "wol_mac")) {
+            snprintf(cfg->wol_mac, sizeof(cfg->wol_mac), "%s", val);
+        }
+        else if (!strcmp(key, "wol_auto")) {
+            cfg->wol_auto = parse_bool(val);
+        }
+        else if (!strcmp(key, "surround51"))
+            cfg->surround51 = parse_bool(val);
+        else if (!strcmp(key, "touchpad_mouse"))
+            cfg->touchpad_mouse = parse_bool(val);
+        else if (!strcmp(key, "gyro_motion"))
+            cfg->gyro_motion = parse_bool(val);
         else if (!strcmp(key, "dec_pipeline_depth"))
             cfg->dec_pipeline_depth = atoi(val);
         else if (!strcmp(key, "dec_thread_prio"))
@@ -192,6 +213,18 @@ int config_load(app_config_t *cfg, const char *dir) {
         cfg->dec_au_onion = true;
     }
 
+    /* Rev 3: the Orbis theme (PS4 system look) ships as the new
+     * default. Configs from earlier revisions always pin ui_theme, and
+     * everyone who never touched the setting has 0 (the old default), so
+     * rev < 3 files move a still-default 0 to Orbis once; deliberate
+     * Midnight users can pick it back in Settings and rev 3 files keep
+     * whatever they pin. */
+    if (cfg_rev < 3 && cfg->ui_theme == 0) {
+        cfg->ui_theme = 5;
+        LOGW("config: rev %d < 3; theme 0 -> 5 (Orbis) one-time migration",
+             cfg_rev);
+    }
+
     LOGI("config: host=%s app=%s debug=%s %dx%d@%d br=%d pkt=%d hw=%d ycbcr=%d file_log=%d",
          cfg->host, cfg->app_name, cfg->debug_host,
          cfg->stream.width, cfg->stream.height, cfg->stream.fps, cfg->stream.bitrate,
@@ -211,7 +244,7 @@ int config_save(const app_config_t *cfg, const char *dir) {
     }
     fprintf(f,
             "# moonlight-ps4\n"
-            "cfg_rev = 2\n"
+            "cfg_rev = 3\n"
             "host = %s\n"
             "http_port = %u\n"
             "app = %s\n"
@@ -228,7 +261,13 @@ int config_save(const app_config_t *cfg, const char *dir) {
             "prefer_ycbcr = %s\n"
             "enable_file_log = %s\n"
             "show_stats = %s\n"
+            "autostart = %s\n"
             "ui_theme = %d\n"
+            "wol_mac = %s\n"
+            "wol_auto = %s\n"
+            "surround51 = %s\n"
+            "touchpad_mouse = %s\n"
+            "gyro_motion = %s\n"
             "dec_pipeline_depth = %d\n"
             "dec_thread_prio = %d\n"
             "slices_per_frame = %d\n"
@@ -246,7 +285,13 @@ int config_save(const app_config_t *cfg, const char *dir) {
             cfg->prefer_ycbcr ? "true" : "false",
             cfg->enable_file_log ? "true" : "false",
             cfg->show_stats ? "true" : "false",
+            cfg->autostart ? "true" : "false",
             cfg->ui_theme,
+            cfg->wol_mac,
+            cfg->wol_auto ? "true" : "false",
+            cfg->surround51 ? "true" : "false",
+            cfg->touchpad_mouse ? "true" : "false",
+            cfg->gyro_motion ? "true" : "false",
             cfg->dec_pipeline_depth, cfg->dec_thread_prio, cfg->slices_per_frame,
             cfg->dec_au_onion ? "true" : "false",
             cfg->dec_fb_garlic ? "true" : "false",

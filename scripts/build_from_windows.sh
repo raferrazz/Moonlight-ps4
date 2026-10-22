@@ -29,7 +29,7 @@ fi
 scripts/build_pkg.sh
 mkdir -p "$SOURCE/dist"
 VERSION="$(sed -n 's/^VERSION="\([^"]*\)"/\1/p' scripts/make_pkg.sh)"
-cp "build-ps4/Moonlight-${VERSION}.pkg" "$SOURCE/dist/Moonlight-PS4-${VERSION}-test.pkg"
+cp "build-ps4/Moonlight-${VERSION}.pkg" "$SOURCE/dist/Moonlight-PS4-${VERSION}.pkg"
 cd "$SOURCE/dist"
-sha256sum "Moonlight-PS4-${VERSION}-test.pkg" > SHA256SUMS
-echo "PKG: $SOURCE/dist/Moonlight-PS4-${VERSION}-test.pkg"
+sha256sum "Moonlight-PS4-${VERSION}.pkg" > SHA256SUMS
+echo "PKG: $SOURCE/dist/Moonlight-PS4-${VERSION}.pkg"

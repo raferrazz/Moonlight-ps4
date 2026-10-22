@@ -23,6 +23,13 @@ void ui_label(ui_surface_t *s, int x, int y, int size, int bold, uint32_t color,
 int ui_label_w(int size, int bold, const char *text);
 void ui_label_fit(ui_surface_t *s, int x, int y, int size, int bold, uint32_t color, const char *text, int width);
 void ui_round_rect(ui_surface_t *s, int x, int y, int w, int h, int radius, uint32_t color);
+/* translucent rounded panel (blends over streamed game frames). */
+void ui_round_rect_alpha(ui_surface_t *s, int x, int y, int w, int h,
+                         int radius, uint32_t color, int opacity);
+/* anti-aliased progress ring; angles 0..1000 permille clockwise
+ * from the top (full ring when 0..1000). Blend, no hard edges. */
+void ui_ring_arc(ui_surface_t *s, int cx, int cy, int radius, int thickness,
+                 uint32_t color, int start_permille, int end_permille);
 void ui_overlay(ui_surface_t *s, int x, int y, int w, int h, uint32_t color, int opacity);
 void ui_focus(ui_surface_t *s, int x, int y, int w, int h, int radius, uint32_t color, int glow);
 void ui_icon(ui_surface_t *s, int x, int y, int size, int type, uint32_t color);
