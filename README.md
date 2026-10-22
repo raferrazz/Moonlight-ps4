@@ -24,6 +24,8 @@ Stream your PC games to a jailbroken PS4 with Sunshine and a DualShock 4.
 > affiliated with, endorsed by, or maintained by the official Moonlight project.
 > Product names belong to their respective owners.
 
+> Fully vibe-coded because i suck at coding, but i had problems i wanted fixed in the original app.
+
 ## What's new in 1.5.5
 
 Everything below is new since 01.35.
