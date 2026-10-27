@@ -89,7 +89,7 @@ index 2b5182e..e107910 100644
              return -1;
          }
 diff --git a/src/PlatformSockets.c b/src/PlatformSockets.c
-index cec96f3..00942fe 100644
+index cec96f3..928fa8e 100644
 --- a/src/PlatformSockets.c
 +++ b/src/PlatformSockets.c
 @@ -45,9 +45,9 @@ void addrToUrlSafeString(struct sockaddr_storage* addr, char* string, size_t str
@@ -122,25 +122,31 @@ index cec96f3..00942fe 100644
          memcpy(&bindAddr, localAddr, addrLen);
          SET_PORT(&bindAddr, 0);
      }
-@@ -427,7 +427,17 @@ int setSocketNonBlocking(SOCKET s, bool enabled) {
+@@ -427,7 +427,23 @@ int setSocketNonBlocking(SOCKET s, bool enabled) {
  SOCKET createSocket(int addressFamily, int socketType, int protocol, bool nonBlocking) {
      SOCKET s;
  
 +#if defined(__ORBIS__) || defined(__PS4__) || defined(__OPENORBIS__)
-+    // On Orbis, IPPROTO_UDP (17) sometimes returns EPROTONOSUPPORT; protocol 0 works.
-+    if (socketType == SOCK_DGRAM && protocol == IPPROTO_UDP)
-+        s = socket(addressFamily, socketType, 0);
-+    else
-+        s = socket(addressFamily, socketType, protocol);
-+    if (s == INVALID_SOCKET && protocol != 0)
-+        s = socket(addressFamily, socketType, protocol);
-+#else
      s = socket(addressFamily, socketType, protocol);
++    if (s == INVALID_SOCKET && protocol != 0) {
++        // Orbis quirk: explicit protocol numbers sometimes fail with
++        // EPROTONOSUPPORT even when the type/protocol pair is valid
++        // (seen with IPPROTO_UDP); protocol 0 works. Retry once and log
++        // both raw errors - the errno behind the failing pair is what
++        // field debugging of stream-start failures needs.
++        int firstErr = (int)LastSocketError();
++        s = socket(addressFamily, socketType, 0);
++        Limelog("socket(af=%d, type=%d, proto=%d) failed: %d; retry with proto 0: %s\n",
++                addressFamily, socketType, protocol, firstErr,
++                s == INVALID_SOCKET ? "failed" : "ok");
++    }
++#else
++    s = socket(addressFamily, socketType, protocol);
 +#endif
      if (s == INVALID_SOCKET) {
          Limelog("socket() failed: %d\n", (int)LastSocketError());
          return INVALID_SOCKET;
-@@ -455,7 +465,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
+@@ -455,7 +471,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
      int err;
  
      // Create a non-blocking TCP socket
@@ -149,7 +155,7 @@ index cec96f3..00942fe 100644
      if (s == INVALID_SOCKET) {
          return INVALID_SOCKET;
      }
-@@ -475,7 +485,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
+@@ -475,7 +491,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
  
      // Windows doesn't support setting TCP_MAXSEG but IP_PMTUDISC_DONT forces the MSS to the protocol
      // minimum which is what we want here. Linux doesn't do this (disabling PMTUD just avoids setting DF).
@@ -158,7 +164,7 @@ index cec96f3..00942fe 100644
          int val = IP_PMTUDISC_DONT;
          if (setsockopt(s, IPPROTO_IP, IP_MTU_DISCOVER, (char*)&val, sizeof(val)) < 0) {
              Limelog("setsockopt(IP_MTU_DISCOVER, IP_PMTUDISC_DONT) failed: %d\n", val, (int)LastSocketError());
-@@ -497,7 +507,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
+@@ -497,7 +513,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
          Limelog("setsockopt(TCP_NOOPT, %d) failed: %d\n", val, (int)LastSocketError());
      }
  #elif defined(TCP_MAXSEG)
@@ -167,7 +173,7 @@ index cec96f3..00942fe 100644
  
      if (setsockopt(s, IPPROTO_TCP, TCP_MAXSEG, (char*)&val, sizeof(val)) < 0) {
          Limelog("setsockopt(TCP_MAXSEG, %d) failed: %d\n", val, (int)LastSocketError());
-@@ -577,7 +587,9 @@ int getLocalAddressByUdpConnect(const struct sockaddr_storage* targetAddr, SOCKA
+@@ -577,7 +593,9 @@ int getLocalAddressByUdpConnect(const struct sockaddr_storage* targetAddr, SOCKA
  
      LC_ASSERT(targetPort != 0);
  
@@ -178,7 +184,7 @@ index cec96f3..00942fe 100644
      if (udpSocket == INVALID_SOCKET) {
          return LastSocketError();
      }
-@@ -763,11 +775,11 @@ bool isInSubnetV6(struct sockaddr_in6* sin6, unsigned char* subnet, int prefixLe
+@@ -763,11 +781,11 @@ bool isInSubnetV6(struct sockaddr_in6* sin6, unsigned char* subnet, int prefixLe
  #endif
  
  bool isPrivateNetworkAddress(struct sockaddr_storage* address) {
@@ -192,7 +198,7 @@ index cec96f3..00942fe 100644
          struct sockaddr_in6* sin6 = (struct sockaddr_in6*)address;
          static unsigned char linkLocalPrefix[] = {0xfe, 0x80};
          static unsigned char siteLocalPrefix[] = {0xfe, 0xc0};
-@@ -793,7 +805,7 @@ bool isPrivateNetworkAddress(struct sockaddr_storage* address) {
+@@ -793,7 +811,7 @@ bool isPrivateNetworkAddress(struct sockaddr_storage* address) {
  
  bool isNat64SynthesizedAddress(struct sockaddr_storage* address) {
  #ifdef AF_INET6

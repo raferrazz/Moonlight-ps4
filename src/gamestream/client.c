@@ -271,10 +271,25 @@ int gs_init(gs_server_t *server, client_identity_t *id, const char *address,
     LOGI("gs_init: HTTP OK paired=%d httpsPort=%u ver=%s",
          server->paired, server->httpsPort, server->appVersion);
 
-    LOGI("gs_init: HTTPS serverinfo port %u ...", server->httpsPort);
-    if (load_serverinfo(server, true) != GS_OK) {
-        LOGW("gs_init: HTTPS serverinfo failed (normal if not paired); paired=0");
-        server->paired = false;
+    if (!server->paired) {
+        /* Unpaired: skip the HTTPS serverinfo entirely. Sunshine only
+         * serves the full state (Wake-on-LAN MAC included) to PAIRED
+         * HTTPS callers, so the probe can never move this flow forward
+         * - it is pure dead time, and on a host whose secure port is
+         * slow to answer it was 7 s of silent-ClientHello timeout in
+         * front of every PIN screen (observed on console: four
+         * connects in a row, ~10 s each, "the PC feels far away").
+         * Pairing re-fetches serverinfo over HTTPS once it succeeds. */
+        LOGI("gs_init: not paired; skipping HTTPS serverinfo probe");
+    } else if (load_serverinfo(server, true) != GS_OK) {
+        /* Paired per the HTTP answer, but the secure port did not
+         * answer. Keep the paired state instead of forcing a re-pair:
+         * the re-pair path ends in an unpair on failure, which would
+         * eat the stored pairing server-side without ever proving
+         * this client wrong. The menu retries HTTPS for applist,
+         * where the compat-hello TLS fallback gets its chance. */
+        LOGW("gs_init: HTTPS serverinfo failed; keeping paired state "
+             "from HTTP");
     } else {
         LOGI("gs_init: HTTPS OK paired=%d", server->paired);
     }
@@ -339,8 +354,18 @@ int gs_pair_ex(gs_server_t *server, const char *pin, unsigned timeout_ms) {
         return ret;
     }
 
-    if ((ret = xml_get_field(&resp, "paired", &result)) != GS_OK)
+    if ((ret = xml_get_field(&resp, "paired", &result)) != GS_OK) {
+        /* The server answered HTTP 200 but with an XML error code of
+         * its own; its words are the only real diagnosis ("another
+         * pairing in progress", newer builds' 409 "a pairing session
+         * with this uniqueid already exists"). The response is freed
+         * on the way out, so the body is logged here - this is the
+         * ~115-byte fast-fail class observed on console. */
+        if (resp.body && resp.len)
+            LOGE("pairing: phase 1 rejected by the server: %.160s",
+                 resp.body);
         goto fail_resp;
+    }
     if (strcmp(result, "1") != 0) {
         gs_error = "Pairing rejected (phase 1)";
         ret = GS_FAILED;

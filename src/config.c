@@ -1,6 +1,7 @@
 #include "config.h"
 #include "log.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,9 +49,11 @@ void config_set_defaults(app_config_t *cfg) {
     cfg->ui_theme = 5; /* Orbis (PS4 system look) is the default */
     cfg->wol_mac[0] = '\0';      /* WOL off until the user sets a MAC */
     cfg->wol_auto = false;        /* provenance flag (host vs. manual) */
-    cfg->surround51 = false;     /* stereo is the safe default on any TV/AVR */
+    cfg->surround_mode = 0;      /* stereo is the safe default on any TV/AVR */
     cfg->touchpad_mouse = true;  /* natural for Desktop; games never touch it */
     cfg->gyro_motion = true;     /* motion aiming works out of the box */
+    cfg->pc_count = 0;
+    cfg->pc_active = -1;
     snprintf(cfg->app_name, sizeof(cfg->app_name), "Steam Big Picture");
 }
 
@@ -76,6 +79,188 @@ static char *trim(char *s) {
 
 static int parse_bool(const char *v) {
     return !strcasecmp(v, "true") || !strcmp(v, "1") || !strcasecmp(v, "yes");
+}
+
+/* --- saved-PC list ------------------------------------------------ */
+
+/* Mirror pcs[pc_active] into the flat host/wol_mac fields the rest of
+ * the app reads. Clears them when there is no active PC. */
+static void pc_mirror_active(app_config_t *cfg) {
+    if (cfg->pc_active < 0 || cfg->pc_active >= cfg->pc_count) {
+        cfg->pc_active = cfg->pc_count > 0 ? 0 : -1;
+        if (cfg->pc_active < 0) {
+            cfg->host[0] = '\0';
+            cfg->wol_mac[0] = '\0';
+            cfg->wol_auto = false;
+            return;
+        }
+    }
+    const saved_pc_t *pc = &cfg->pcs[cfg->pc_active];
+    snprintf(cfg->host, sizeof(cfg->host), "%s", pc->host);
+    snprintf(cfg->wol_mac, sizeof(cfg->wol_mac), "%s", pc->mac);
+    cfg->wol_auto = pc->mac_auto != 0;
+}
+
+int config_pc_add(app_config_t *cfg, const char *host, const char *name,
+                  const char *mac) {
+    if (!host || !host[0])
+        return -1;
+
+    /* Dedup: an existing entry moves to the MRU head. */
+    for (int i = 0; i < cfg->pc_count; i++) {
+        if (!strcasecmp(cfg->pcs[i].host, host)) {
+            saved_pc_t pc = cfg->pcs[i];
+            if (name && name[0])
+                snprintf(pc.name, sizeof(pc.name), "%s", name);
+            if (mac && mac[0])
+                snprintf(pc.mac, sizeof(pc.mac), "%s", mac);
+            for (int k = i; k > 0; k--)
+                cfg->pcs[k] = cfg->pcs[k - 1];
+            cfg->pcs[0] = pc;
+            cfg->pc_active = 0;
+            pc_mirror_active(cfg);
+            return 0;
+        }
+    }
+
+    if (cfg->pc_count >= CONFIG_MAX_PCS) {
+        /* Full: drop the least-recently-used tail. */
+        cfg->pc_count = CONFIG_MAX_PCS - 1;
+    }
+    for (int k = cfg->pc_count; k > 0; k--)
+        cfg->pcs[k] = cfg->pcs[k - 1];
+    saved_pc_t *pc = &cfg->pcs[0];
+    memset(pc, 0, sizeof(*pc));
+    snprintf(pc->host, sizeof(pc->host), "%s", host);
+    if (name && name[0])
+        snprintf(pc->name, sizeof(pc->name), "%s", name);
+    if (mac && mac[0])
+        snprintf(pc->mac, sizeof(pc->mac), "%s", mac);
+    cfg->pc_count++;
+    cfg->pc_active = 0;
+    pc_mirror_active(cfg);
+    return 0;
+}
+
+void config_pc_remove(app_config_t *cfg, int index) {
+    if (index < 0 || index >= cfg->pc_count)
+        return;
+    for (int k = index; k + 1 < cfg->pc_count; k++)
+        cfg->pcs[k] = cfg->pcs[k + 1];
+    cfg->pc_count--;
+    memset(&cfg->pcs[cfg->pc_count], 0, sizeof(cfg->pcs[cfg->pc_count]));
+    if (cfg->pc_active == index)
+        cfg->pc_active = cfg->pc_count > 0 ? 0 : -1;
+    else if (cfg->pc_active > index)
+        cfg->pc_active--;
+    pc_mirror_active(cfg);
+}
+
+void config_pc_touch(app_config_t *cfg, int index) {
+    if (index < 0 || index >= cfg->pc_count)
+        return;
+    if (index == 0) {
+        cfg->pc_active = 0;
+        pc_mirror_active(cfg);
+        return;
+    }
+    saved_pc_t pc = cfg->pcs[index];
+    for (int k = index; k > 0; k--)
+        cfg->pcs[k] = cfg->pcs[k - 1];
+    cfg->pcs[0] = pc;
+    cfg->pc_active = 0;
+    pc_mirror_active(cfg);
+}
+
+void config_pc_note_mac(app_config_t *cfg, const char *mac) {
+    if (!cfg->host[0])
+        return;
+    /* The entry matching the active host (case-insensitive) keeps the
+     * per-PC MAC; the flat wol_mac mirror follows. */
+    for (int i = 0; i < cfg->pc_count; i++) {
+        if (!strcasecmp(cfg->pcs[i].host, cfg->host)) {
+            snprintf(cfg->pcs[i].mac, sizeof(cfg->pcs[i].mac), "%s",
+                     mac ? mac : "");
+            cfg->pcs[i].mac_auto = (mac && mac[0]) ? 1 : 0;
+            if (i == cfg->pc_active)
+                break;
+        }
+    }
+    snprintf(cfg->wol_mac, sizeof(cfg->wol_mac), "%s", mac ? mac : "");
+    cfg->wol_auto = cfg->wol_mac[0] != '\0';
+}
+
+void config_pc_set_mac_manual(app_config_t *cfg, const char *mac) {
+    if (!cfg->host[0])
+        return;
+    for (int i = 0; i < cfg->pc_count; i++) {
+        if (!strcasecmp(cfg->pcs[i].host, cfg->host)) {
+            snprintf(cfg->pcs[i].mac, sizeof(cfg->pcs[i].mac), "%s",
+                     mac ? mac : "");
+            cfg->pcs[i].mac_auto = 0;
+            break;
+        }
+    }
+    snprintf(cfg->wol_mac, sizeof(cfg->wol_mac), "%s", mac ? mac : "");
+    cfg->wol_auto = false;
+}
+
+void config_pc_note_name(app_config_t *cfg, const char *host,
+                         const char *name) {
+    if (!host || !host[0] || !name || !name[0])
+        return;
+    for (int i = 0; i < cfg->pc_count; i++) {
+        if (!strcasecmp(cfg->pcs[i].host, host)) {
+            snprintf(cfg->pcs[i].name, sizeof(cfg->pcs[i].name), "%s", name);
+            return;
+        }
+    }
+}
+
+/* Parse one "host | name | mac | auto" [pcs] line. Fields may be empty. */
+static void parse_pc_line(app_config_t *cfg, const char *val) {
+    char host[CONFIG_MAX_HOST] = "";
+    char name[64] = "";
+    char mac[24] = "";
+    char auto_v[8] = "";
+    char *fields[4] = { host, name, mac, auto_v };
+    size_t caps[4] = { sizeof(host), sizeof(name), sizeof(mac),
+                       sizeof(auto_v) };
+    int fi = 0;
+    const char *p = val;
+    while (fi < 4) {
+        const char *bar = strchr(p, '|');
+        size_t len = bar ? (size_t)(bar - p) : strlen(p);
+        if (len >= caps[fi])
+            len = caps[fi] - 1;
+        memcpy(fields[fi], p, len);
+        fields[fi][len] = '\0';
+        /* trim */
+        char *d = fields[fi];
+        while (isspace((unsigned char)*d))
+            memmove(d, d + 1, strlen(d));
+        for (char *e = d + strlen(d); e > d && isspace((unsigned char)e[-1]);)
+            *--e = '\0';
+        if (!bar)
+            break;
+        p = bar + 1;
+        fi++;
+    }
+    if (!host[0])
+        return;
+    /* Append preserving file order (MRU); duplicates keep the first. */
+    for (int i = 0; i < cfg->pc_count; i++) {
+        if (!strcasecmp(cfg->pcs[i].host, host))
+            return;
+    }
+    if (cfg->pc_count >= CONFIG_MAX_PCS)
+        return;
+    saved_pc_t *pc = &cfg->pcs[cfg->pc_count++];
+    memset(pc, 0, sizeof(*pc));
+    snprintf(pc->host, sizeof(pc->host), "%s", host);
+    snprintf(pc->name, sizeof(pc->name), "%s", name);
+    snprintf(pc->mac, sizeof(pc->mac), "%s", mac);
+    pc->mac_auto = (char)(parse_bool(auto_v) ? 1 : 0);
 }
 
 int config_load(app_config_t *cfg, const char *dir) {
@@ -112,16 +297,43 @@ int config_load(app_config_t *cfg, const char *dir) {
     LOGI("config: leyendo %s", path);
 
     int cfg_rev = 1; /* files without the key predate the rev-2 decode defaults */
+    int surround_explicit = 0;
+    char section[24] = ""; /* current [section]; "" = the flat legacy head */
     while (fgets(line, sizeof(line), f)) {
         char *p = trim(line);
-        if (!*p || *p == '#' || *p == ';' || *p == '[')
+        if (!*p || *p == '#' || *p == ';')
             continue;
+        if (*p == '[') {
+            /* [section] header - track it so the [pcs] keys below do not
+             * collide with flat keys (a bare "count" used to warn). */
+            char *close = strchr(p, ']');
+            if (close) {
+                *close = '\0';
+                snprintf(section, sizeof(section), "%s", p + 1);
+            }
+            continue;
+        }
         char *eq = strchr(p, '=');
         if (!eq)
             continue;
         *eq = '\0';
         char *key = trim(p);
         char *val = trim(eq + 1);
+
+        if (!strcmp(section, "pcs")) {
+            /* Saved-PC list (MRU order = file order). */
+            if (!strncmp(key, "pc", 2) && isdigit((unsigned char)key[2]) &&
+                !key[3]) {
+                parse_pc_line(cfg, val);
+            } else if (!strcmp(key, "pc_active")) {
+                int idx = atoi(val);
+                if (idx >= 0 && idx < CONFIG_MAX_PCS)
+                    cfg->pc_active = idx;
+            }
+            /* pc_count is informational; the lines themselves are the
+             * source of truth (a truncated tail must not corrupt MRU). */
+            continue;
+        }
 
         if (!strcmp(key, "cfg_rev"))
             cfg_rev = atoi(val);
@@ -171,8 +383,17 @@ int config_load(app_config_t *cfg, const char *dir) {
         else if (!strcmp(key, "wol_auto")) {
             cfg->wol_auto = parse_bool(val);
         }
-        else if (!strcmp(key, "surround51"))
-            cfg->surround51 = parse_bool(val);
+        else if (!strcmp(key, "surround_mode")) {
+            int mode = atoi(val);
+            if (mode >= 0 && mode <= 2)
+                cfg->surround_mode = mode;
+            surround_explicit = 1;
+        }
+        else if (!strcmp(key, "surround51")) {
+            /* legacy rev < 4 key */
+            if (parse_bool(val))
+                cfg->surround_mode = 1;
+        }
         else if (!strcmp(key, "touchpad_mouse"))
             cfg->touchpad_mouse = parse_bool(val);
         else if (!strcmp(key, "gyro_motion"))
@@ -225,11 +446,42 @@ int config_load(app_config_t *cfg, const char *dir) {
              cfg_rev);
     }
 
+    /* Rev 4: the saved-PC list ([pcs]) and the surround tri-state arrive
+     * together. A file with no [pcs] lines but a legacy flat host (or a
+     * phases-0-2 host.txt) seeds the list with that one computer - its
+     * wol_mac/wol_auto become the entry's per-PC MAC - so the PCs tab
+     * opens with the user's machine already on it, exactly as before. */
+    if (cfg->pc_count == 0 && cfg->host[0]) {
+        saved_pc_t *pc = &cfg->pcs[0];
+        memset(pc, 0, sizeof(*pc));
+        snprintf(pc->host, sizeof(pc->host), "%s", cfg->host);
+        snprintf(pc->mac, sizeof(pc->mac), "%s", cfg->wol_mac);
+        pc->mac_auto = cfg->wol_auto ? 1 : 0;
+        cfg->pc_count = 1;
+        cfg->pc_active = 0;
+        if (cfg_rev < 4)
+            LOGW("config: rev %d < 4; migrating host '%s' into the saved "
+                 "PC list", cfg_rev, cfg->host);
+    }
+    if (cfg->pc_active < 0 || cfg->pc_active >= cfg->pc_count)
+        cfg->pc_active = cfg->pc_count > 0 ? 0 : -1;
+    /* The [pcs] section is the store; the flat keys mirror the active
+     * entry for every pre-list reader (stream.c, the launch ladder). */
+    if (cfg->pc_count > 0) {
+        const saved_pc_t *pc = &cfg->pcs[cfg->pc_active];
+        snprintf(cfg->host, sizeof(cfg->host), "%s", pc->host);
+        snprintf(cfg->wol_mac, sizeof(cfg->wol_mac), "%s", pc->mac);
+        cfg->wol_auto = pc->mac_auto != 0;
+    }
+
     LOGI("config: host=%s app=%s debug=%s %dx%d@%d br=%d pkt=%d hw=%d ycbcr=%d file_log=%d",
          cfg->host, cfg->app_name, cfg->debug_host,
          cfg->stream.width, cfg->stream.height, cfg->stream.fps, cfg->stream.bitrate,
          cfg->stream.packetSize, cfg->prefer_hw, cfg->prefer_ycbcr,
          cfg->enable_file_log);
+    if (cfg->pc_count > 0)
+        LOGI("config: %d saved PC(s), active=%d (%s)", cfg->pc_count,
+             cfg->pc_active, cfg->pcs[cfg->pc_active].host);
     return 0;
 }
 
@@ -244,7 +496,8 @@ int config_save(const app_config_t *cfg, const char *dir) {
     }
     fprintf(f,
             "# moonlight-ps4\n"
-            "cfg_rev = 3\n"
+            "# host/wol_mac mirror the ACTIVE PC from [pcs] (MRU-first).\n"
+            "cfg_rev = 4\n"
             "host = %s\n"
             "http_port = %u\n"
             "app = %s\n"
@@ -265,7 +518,7 @@ int config_save(const app_config_t *cfg, const char *dir) {
             "ui_theme = %d\n"
             "wol_mac = %s\n"
             "wol_auto = %s\n"
-            "surround51 = %s\n"
+            "surround_mode = %d\n"
             "touchpad_mouse = %s\n"
             "gyro_motion = %s\n"
             "dec_pipeline_depth = %d\n"
@@ -289,13 +542,29 @@ int config_save(const app_config_t *cfg, const char *dir) {
             cfg->ui_theme,
             cfg->wol_mac,
             cfg->wol_auto ? "true" : "false",
-            cfg->surround51 ? "true" : "false",
+            cfg->surround_mode,
             cfg->touchpad_mouse ? "true" : "false",
             cfg->gyro_motion ? "true" : "false",
             cfg->dec_pipeline_depth, cfg->dec_thread_prio, cfg->slices_per_frame,
             cfg->dec_au_onion ? "true" : "false",
             cfg->dec_fb_garlic ? "true" : "false",
             cfg->bgra_workers, cfg->bgra_nt);
+
+    /* Saved-PC list: MRU-first; pc0 is the active computer. The pipe
+     * format keeps hand-editing sane (empty fields are allowed). */
+    if (cfg->pc_count > 0) {
+        int active = cfg->pc_active >= 0 && cfg->pc_active < cfg->pc_count
+                         ? cfg->pc_active : 0;
+        fprintf(f, "\n[pcs]\npc_count = %d\npc_active = %d\n",
+                cfg->pc_count, active);
+        for (int i = 0; i < cfg->pc_count; i++) {
+            const saved_pc_t *pc = &cfg->pcs[i];
+            fprintf(f, "pc%d = %s | %s | %s | %s\n", i, pc->host,
+                    pc->name[0] ? pc->name : "",
+                    pc->mac[0] ? pc->mac : "",
+                    pc->mac_auto ? "true" : "false");
+        }
+    }
     fclose(f);
     return 0;
 }

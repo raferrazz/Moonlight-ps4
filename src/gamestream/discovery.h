@@ -78,15 +78,19 @@ int subnet_discover(mdns_host_t *hosts, int count, int capacity);
 
 /* Incremental scan for the menu (runs on a worker thread).
  *
- *   scan_job_begin(hint_host)  spawn the worker (hint = last host, may
- *                              be NULL/empty)
- *   scan_job_poll(...)         snapshot the current results + status
- *   scan_job_done(...)         1 once the scan has finished
- *   scan_job_finish(&job)      consume or abandon; the worker frees a
- *                              still-running job by itself
+ *   scan_job_begin_list(hosts, n)  spawn the worker probing every saved
+ *                                  PC (callers pass them MRU-first;
+ *                                  statuses land incrementally)
+ *   scan_job_begin(hint_host)      1-entry convenience wrapper (CLI,
+ *                                  host tests)
+ *   scan_job_poll(...)             snapshot the current results + status
+ *   scan_job_done(...)             1 once the scan has finished
+ *   scan_job_finish(&job)          consume or abandon; the worker frees a
+ *                                  still-running job by itself
  */
 typedef struct scan_job scan_job_t;
 
+scan_job_t *scan_job_begin_list(const char *const *hosts, int n);
 scan_job_t *scan_job_begin(const char *hint_host);
 int scan_job_poll(scan_job_t *j, mdns_host_t *out_hosts, int cap,
                   char *phase_text, size_t phase_cap);

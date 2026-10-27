@@ -14,6 +14,7 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <math.h>
 #include <pthread.h>
 #include <sys/time.h>
 
@@ -94,12 +95,38 @@ void ui_show_status(const char *title, const char *line1, const char *line2) {
 
     ui_surface_t s = { staging, (int)pitch, UI_W, UI_H };
     ui_theme_background(&s);
-    ui_text(&s, 80, 80, 5, COL_TEXT, title ? title : "MOONLIGHT");
-    if (line1 && line1[0])
-        ui_text(&s, 80, 220, 4, COL_ACCENT, line1);
-    if (line2 && line2[0])
-        ui_text(&s, 80, 320, 3, COL_DIM, line2);
-    ui_text(&s, 80, UI_H - 60, 2, COL_DIM, "Please wait...");
+
+    /* Centered system-screen composition. The pairing screen shows the
+     * PIN in display-size digits, the way console PIN entries read at
+     * TV distance. */
+    const char *head = title ? title : "Moonlight";
+    int hw = ui_label_caps_w(40, head, 8);
+    ui_label_caps(&s, UI_W / 2 - hw / 2, 300, 40, COL_TEXT, head, 8);
+
+    if (line1 && line1[0]) {
+        if (strncmp(line1, "PIN: ", 5) == 0) {
+            const char *digits = line1 + 5;
+            ui_label(&s, UI_W / 2 - ui_label_w(30, 0,
+                     "Enter this PIN on your PC") / 2, 400, 30, 0, COL_DIM,
+                     "Enter this PIN on your PC");
+            int dw = ui_label_caps_w(104, digits, 28);
+            ui_label_caps(&s, UI_W / 2 - dw / 2, 486, 104, COL_TEXT,
+                          digits, 28);
+        } else {
+            /* Headline in white, not the accent: a 54 px saturated-blue
+             * line ("Could not connect", "Paired OK"...) reads as
+             * non-native - system screens keep the headline white and
+             * reserve blue for values/toggles. */
+            int lw = ui_label_w(54, 1, line1);
+            ui_label(&s, UI_W / 2 - lw / 2, 470, 54, 1, COL_TEXT, line1);
+        }
+    }
+    if (line2 && line2[0]) {
+        int lw = ui_label_w(26, 0, line2);
+        ui_label(&s, UI_W / 2 - lw / 2, 640, 26, 0, COL_DIM, line2);
+    }
+    ui_label(&s, UI_W / 2 - ui_label_w(24, 0, "Please wait...") / 2, 748, 24,
+             0, COL_DIM, "Please wait...");
 
     for (int i = 0; i < 4; i++) {
         (void)video_ui_present(staging, (int)pitch);
@@ -122,14 +149,6 @@ void ui_show_status(const char *title, const char *line1, const char *line2) {
  * elapsed-seconds counter at ~30 fps, and lets CIRCLE cancel: the worker
  * checks prog->cancelled between its bounded steps.
  */
-static uint32_t launch_mix(uint32_t under, uint32_t over, int alpha) {
-    unsigned inv = 255 - (unsigned)alpha;
-    return 0xff000000u |
-        (((((under >> 16) & 255) * inv + ((over >> 16) & 255) * (unsigned)alpha) / 255) << 16) |
-        (((((under >> 8) & 255) * inv + ((over >> 8) & 255) * (unsigned)alpha) / 255) << 8) |
-        (((under & 255) * inv + (over & 255) * (unsigned)alpha) / 255);
-}
-
 void ui_launch_screen_run(const char *game, const char *verb,
                            launch_progress_t *prog) {
     if (video_ui_begin(UI_W, UI_H) != 0) {
@@ -164,39 +183,60 @@ void ui_launch_screen_run(const char *game, const char *verb,
         ui_surface_t s = { staging, (int)pitch, UI_W, UI_H };
         ui_theme_background(&s);
 
-        ui_text(&s, 80, 250, 3, COL_DIM, head);
-        ui_label_fit(&s, 80, 310, 60, 1, COL_TEXT, name, 1760);
-        if (prog->phase[0])
-            ui_label_fit(&s, 80, 450, 30, 0, COL_ACCENT, prog->phase, 1760);
-
-        /* PS4-style orbiting spinner: eight dots at fixed 45-degree spots,
-         * the fading trail rotates through them (no libm, no cos/sin). */
-        {
-            static const int spin_dx[8] = {1024, 724, 0, -724, -1024, -724, 0, 724};
-            static const int spin_dy[8] = {0, 724, 1024, 724, 0, -724, -1024, -724};
-            int cx = UI_W / 2, cy = 690, radius = 40;
-            int slot = (frame / 2) % 8; /* full turn every 16 frames ~0.5 s */
-            for (int k = 0; k < 8; k++) {
-                int pos = (slot + k) & 7;
-                int alpha = 255 - k * 28;
-                ui_circle(&s, cx + radius * spin_dx[pos] / 1024,
-                          cy + radius * spin_dy[pos] / 1024, 7,
-                          launch_mix(COL_BG, COL_ACCENT, alpha));
-            }
+        /* Centered system-screen composition: tracked-caps verb, display
+         * title, live phase, spinner, and the in-game-style prompt. */
+        const char *verb = cancel_requested ? "Cancelling" : head;
+        int vw2 = ui_label_caps_w(28, verb, 10);
+        ui_label_caps(&s, UI_W / 2 - vw2 / 2, 396, 28, COL_DIM, verb, 10);
+        int nw = ui_label_w(60, 1, name);
+        ui_label(&s, UI_W / 2 - (nw > 1760 ? 1760 : nw) / 2, 448, 60, 1,
+                 COL_TEXT, name);
+        if (prog->phase[0]) {
+            /* Live phase copy in white (same ruling as the status
+             * headlines): blue phase text read as a non-native tint
+             * across the launch/connect reviews; the spinner keeps the
+             * accent as the single color pop. */
+            int pw2 = ui_label_w(30, 0, prog->phase);
+            ui_label(&s, UI_W / 2 - pw2 / 2, 566, 30, 0, COL_TEXT,
+                     prog->phase);
         }
+
+        /* System working spinner (shared with the menu's loading state):
+         * eight dots on a fixed orbit, fading trail, one turn ~0.5 s. */
+        ui_spinner(&s, UI_W / 2, 700, 40, frame, COL_ACCENT);
 
         unsigned long long elapsed_s = (menu_now_ms() - start) / 1000u;
         char line[96];
         if (cancel_requested)
-            snprintf(line, sizeof(line), "Cancelling...  %llu s", elapsed_s);
+            snprintf(line, sizeof(line), "Cancelling  ·  %llu s", elapsed_s);
         else
             snprintf(line, sizeof(line), "%llu s", elapsed_s);
-        ui_text(&s, 80, UI_H - 130, 2, COL_DIM, line);
+        /* The elapsed counter only makes sense once time has actually
+         * passed - a "0 s" next to the spinner reads like an error
+         * code, so the first second stays quiet (spinner + phase carry
+         * the state, like the console). */
+        if (elapsed_s >= 1)
+            ui_label(&s, UI_W / 2 - ui_label_w(24, 0, line) / 2, 838, 24,
+                     0, COL_DIM, line);
 
-        /* Hint bar: CIRCLE cancels. */
-        ui_icon(&s, UI_W - 300, UI_H - 118, 38, 6, cancel_requested ? COL_DIM : 0xffff727d);
-        ui_label(&s, UI_W - 244, UI_H - 122, 26, 0, cancel_requested ? COL_DIM : COL_TEXT,
-                 "Cancel");
+        /* Bottom-center prompt: PS4 chips inline with the copy. The chip
+         * centers on the copy's ink-core midline (the old -6 top sat it
+         * 6 px high next to the labels). */
+        {
+            const char *lab = cancel_requested ? "Cancelling" : "Cancel";
+            int cw = ui_ps_btn_w(32, PSBTN_CIRCLE);
+            int lw = ui_label_w(26, 0, lab);
+            int total = ui_label_w(26, 0, "Press ") + 14 + cw + 14 + lw;
+            int px2 = UI_W / 2 - total / 2;
+            uint32_t ink = cancel_requested ? COL_DIM : COL_TEXT;
+            ui_label(&s, px2, UI_H - 96, 26, 0, ink, "Press ");
+            px2 += ui_label_w(26, 0, "Press ") + 14;
+            ui_ps_btn(&s, px2,
+                      UI_H - 96 + ui_label_ink_cy(26, 0) - 32 / 2, 32,
+                      PSBTN_CIRCLE, cancel_requested ? 130 : 255);
+            px2 += cw + 14;
+            ui_label(&s, px2, UI_H - 96, 26, 0, ink, lab);
+        }
 
         (void)video_ui_present(staging, (int)pitch);
         frame++;
@@ -249,29 +289,66 @@ int ui_launch_fail_screen_run(const char *game, const char *reason,
         ui_surface_t s = { staging, (int)pitch, UI_W, UI_H };
         ui_theme_background(&s);
 
-        ui_text(&s, 80, 250, 3, COL_WARN, "COULD NOT START");
-        ui_label_fit(&s, 80, 310, 60, 1, COL_TEXT, name, 1760);
-        if (reason && reason[0])
-            ui_label_fit(&s, 80, 450, 30, 0, COL_ACCENT, reason, 1760);
+        /* Native error dialog: scrim + framed panel + centered copy +
+         * the function-row verbs inside the panel (the reference PS4
+         * error-dialog pattern). The scrim runs deep (170) - the
+         * console's dialogs leave the theme background barely legible,
+         * and a lighter dim let the background ribbons read as stray
+         * rendering artifacts behind the panel. */
+        ui_scrim(&s, 0xFF000000, 170);
+        const int pw = 1200, ph = 560;
+        const int px = (UI_W - pw) / 2, py = 240;
+        const ui_theme_t *t = ui_theme_current();
+        ui_round_rect_alpha(&s, px, py, pw, ph, 14, t->panel, 250);
+        ui_frame(&s, px, py, pw, ph, t->focus, 2);
 
-        ui_label_fit(&s, 80, 560, 30, 1, COL_TEXT,
-                     allow_refresh
-                         ? "Could not start the stream. Press X to try again, TRIANGLE to refresh."
-                         : "Could not start the stream. Press X to try again.",
-                     1760);
+        int lw = ui_label_w(40, 1, "Could not start");
+        ui_label(&s, UI_W / 2 - lw / 2, py + 64, 40, 1, COL_TEXT,
+                 "Could not start");
+        /* Everything in the reference error dialog is center-aligned;
+         * the first cut left-anchored the app name and reason at fixed
+         * offsets, which read asymmetric in the frame. */
+        lw = ui_label_w(30, 1, name);
+        if (lw > 1080)
+            lw = 1080;
+        ui_label_fit(&s, UI_W / 2 - lw / 2, py + 136, 30, 1, COL_DIM, name,
+                     1080);
+        if (reason && reason[0]) {
+            /* Diagnostic copy muted (dim), not accent: a bright-blue
+             * reason line reads off-system; the reference error dialog
+             * keeps its body copy quiet. */
+            int rw = ui_label_w(26, 0, reason);
+            if (rw > 1040)
+                rw = 1040;
+            ui_label_fit(&s, UI_W / 2 - rw / 2, py + 208, 26, 0, COL_DIM,
+                         reason, 1040);
+        }
 
-        /* Keycap hints, mirroring the launch screen's cancel hint. */
-        int hx = 80, hy = UI_H - 122;
-        ui_icon(&s, hx, hy, 38, 7, 0xff65bcff);
-        ui_label(&s, hx + 52, hy + 4, 26, 0, COL_TEXT, "Retry");
-        hx += 250;
-        ui_icon(&s, hx, hy, 38, 8, allow_refresh ? 0xff69e4bd : COL_DIM);
-        ui_label(&s, hx + 52, hy + 4, 26, 0, allow_refresh ? COL_TEXT : COL_DIM,
-                 "Refresh");
-        if (allow_refresh) {
-            hx += 250;
-            ui_icon(&s, hx, hy, 38, 6, 0xffff727d);
-            ui_label(&s, hx + 52, hy + 4, 26, 0, COL_TEXT, "Back");
+        /* Action row: Retry / Refresh / Back - real chips, PS4 sizing.
+         * Labels ride each chip's midline (ink-core centered). */
+        {
+            struct { const char *label; int btn; int on; } acts[3] = {
+                { "Retry", PSBTN_CROSS, 1 },
+                { "Refresh", PSBTN_TRIANGLE, allow_refresh },
+                { "Back", PSBTN_CIRCLE, 1 },
+            };
+            const int ch = 34;
+            int total = 0;
+            for (int kk = 0; kk < 3; kk++) {
+                total += ui_ps_btn_w(ch, acts[kk].btn) + 14 +
+                         ui_label_w(26, 0, acts[kk].label) +
+                         (kk < 2 ? 64 : 0);
+            }
+            int ax = UI_W / 2 - total / 2;
+            for (int kk = 0; kk < 3; kk++) {
+                int cw = ui_ps_btn_w(ch, acts[kk].btn);
+                int cy = py + ph - 116 + ch / 2;
+                ui_ps_btn(&s, ax, cy - ch / 2, ch, acts[kk].btn,
+                          acts[kk].on ? 255 : 130);
+                ui_label(&s, ax + cw + 14, cy - ui_label_ink_cy(26, 0), 26, 0,
+                         acts[kk].on ? COL_TEXT : COL_DIM, acts[kk].label);
+                ax += cw + 14 + ui_label_w(26, 0, acts[kk].label) + 64;
+            }
         }
 
         (void)video_ui_present(staging, (int)pitch);
@@ -284,6 +361,15 @@ typedef enum {
     TAB_APPS = 1,
     TAB_SETTINGS = 2,
 } ui_tab_t;
+
+/* OSK target that is not a Settings row: the PCs tab's in-place Add PC. */
+#define OSK_ADD_PC (SET_COUNT + 1)
+
+/* Selectable rows on the PCs tab: the saved PCs plus the in-place Add
+ * row at the end (always present, so the empty state has a target too).
+ * Shared by the input handlers and the renderer. */
+#define PCS_ADD_ROW(st) ((st)->nhosts)
+#define PCS_ROWS(st) ((st)->nhosts + 1)
 
 enum {
     SET_HOST = 0,
@@ -331,13 +417,16 @@ static const char *k_set_names[SET_COUNT] = {
 };
 
 /* On-screen keyboards: IPv4 needs digits + dot; the Wake-on-LAN MAC
- * needs hex digits (separators optional). */
+ * needs hex digits (separators optional). The hex pad is wide (6 keys
+ * per row) so both keyboards fit one compact native panel - the old
+ * 6-row hex column put half its keys below the screen. */
 #define OSK_COLS 3
 static const char k_osk_ip[4][OSK_COLS + 1] = {
     "123", "456", "789", ".0."
 };
-static const char k_osk_hex[6][OSK_COLS + 1] = {
-    "123", "456", "789", "ABC", "DEF", ".0:"
+#define OSK_HEX_COLS 6
+static const char k_osk_hex[3][OSK_HEX_COLS + 1] = {
+    "012345", "6789AB", "CDEF.:"
 };
 
 /* Only settings needed for personal play are exposed. The Exit row gives
@@ -374,7 +463,11 @@ typedef struct {
 
     ui_tab_t tab;
     int sel_app;
-    int app_first; /* scroll */
+    double sel_f;      /* eased grid selection (the hero row glides) */
+    unsigned long long tab_anim_ms; /* 0 = settled; else slide start */
+    int tab_dir;       /* +1 = R1 (next tab), -1 = L1 (previous) */
+    unsigned long long toast_ms; /* when st.notice last changed */
+    char status_prev[160]; /* change detector behind the toast */
     int sel_set;
     /* the settings list scrolls - 96px rows (up from 52px/26px text;
      * 14 rows no longer fit at that size). set_scroll eases toward
@@ -383,10 +476,16 @@ typedef struct {
     int set_scroll_target;
 
     int osk_active;
-    int osk_target; /* SET_HOST / SET_DEBUG_HOST / SET_WOL_MAC */
+    int osk_target; /* SET_HOST / SET_DEBUG_HOST / SET_WOL_MAC / OSK_ADD_PC */
     int osk_row, osk_col;
-    int osk_rows;  /* 4 (IP) or 6 (hex MAC) */
+    int osk_rows;  /* 4 (IP) or 3 (hex MAC) */
+    int osk_cols;  /* 3 (IP) or 6 (hex MAC) */
     char osk_buf[CONFIG_MAX_HOST];
+
+    /* OPTIONS on a PC row asks for confirmation before the entry is
+     * dropped (a native modal; the row index is remembered here). */
+    int confirm_active;
+    int confirm_index;
 
     int host_dirty; /* host changed: reconnect required */
     int result;     /* -1000 = stay in loop */
@@ -523,6 +622,10 @@ static void apps_job_free(apps_job_t *j) {
 /* Defined with the settings helpers below; used by the refresh poller so
  * the menu-side WOL MAC adoption can save immediately. */
 static void save_cfg(ui_state_t *st);
+/* PCs-tab helpers (defined with the scan code below; the OSK's Add PC
+ * accept path calls back into them). */
+static void pcs_reseed(ui_state_t *st);
+static void scan_start(ui_state_t *st);
 
 static void *apps_job_thread(void *arg) {
     /* games first — and there is nothing else: the
@@ -769,7 +872,11 @@ static void set_value_str(const ui_state_t *st, int row, char *out, size_t cap) 
     case SET_PREFER_YCBCR:snprintf(out, cap, "%s", c->prefer_ycbcr ? "yes" : "no"); break;
     case SET_FILE_LOG:    snprintf(out, cap, "%s", c->enable_file_log ? "yes" : "no"); break;
     case SET_SHOW_STATS:  snprintf(out, cap, "%s", c->show_stats ? "yes" : "no"); break;
-    case SET_SURROUND:    snprintf(out, cap, "%s", c->surround51 ? "yes (5.1)" : "no (stereo)"); break;
+    case SET_SURROUND:
+        snprintf(out, cap, "%s",
+                 c->surround_mode == 2 ? "yes (7.1)"
+                 : c->surround_mode == 1 ? "yes (5.1)" : "no (stereo)");
+        break;
     case SET_TOUCHPAD_MOUSE: snprintf(out, cap, "%s", c->touchpad_mouse ? "yes" : "no"); break;
     case SET_GYRO:        snprintf(out, cap, "%s", c->gyro_motion ? "yes" : "no"); break;
     case SET_EXIT:        snprintf(out, cap, "Press X to exit"); break;
@@ -800,7 +907,7 @@ static void save_cfg(ui_state_t *st) {
 /* --- OSK helpers --- */
 
 static char osk_char_at(const ui_state_t *st, int row, int col) {
-    if (st->osk_rows > 4)
+    if (st->osk_target == SET_WOL_MAC)
         return k_osk_hex[row][col];
     return k_osk_ip[row][col];
 }
@@ -810,7 +917,8 @@ static void osk_open(ui_state_t *st, int target) {
     st->osk_target = target;
     st->osk_row = 0;
     st->osk_col = 0;
-    st->osk_rows = (target == SET_WOL_MAC) ? 6 : 4;
+    st->osk_rows = (target == SET_WOL_MAC) ? 3 : 4;
+    st->osk_cols = (target == SET_WOL_MAC) ? OSK_HEX_COLS : OSK_COLS;
     const char *cur = NULL;
     if (target == SET_HOST)
         cur = st->cfg->host;
@@ -818,10 +926,8 @@ static void osk_open(ui_state_t *st, int target) {
         cur = st->cfg->debug_host;
     else if (target == SET_WOL_MAC)
         cur = st->cfg->wol_mac;
-    /* no MAC saved yet but the PC already told us one (paired
-     * serverinfo)? Pre-fill it - the user can still edit or clear. */
-    if (target == SET_WOL_MAC && !cur && st->server && st->server->host_mac[0])
-        cur = st->server->host_mac;
+    /* OSK_ADD_PC starts empty: it creates a brand-new entry, never edits
+     * an existing one (re-adding an address just re-selects it). */
     snprintf(st->osk_buf, sizeof(st->osk_buf), "%s", cur ? cur : "");
 }
 
@@ -831,14 +937,16 @@ static void osk_accept(ui_state_t *st) {
         if (!st->osk_buf[0]) {
             st->cfg->wol_mac[0] = '\0';
             st->cfg->wol_auto = false; /* manual clear = manual */
+            config_pc_set_mac_manual(st->cfg, "");
             snprintf(st->notice, sizeof(st->notice),
                      "Wake-on-LAN cleared.");
         } else if (wol_mac_parse(st->osk_buf, mac) == 0) {
-            wol_mac_format(mac, st->cfg->wol_mac, sizeof(st->cfg->wol_mac));
+            char formatted[24];
+            wol_mac_format(mac, formatted, sizeof(formatted));
+            config_pc_set_mac_manual(st->cfg, formatted);
             /* typing by hand marks the value manual; if it matches
              * what the PC reports anyway, the next connect re-flags it
              * auto (stream.c) without changing a digit. */
-            st->cfg->wol_auto = false;
             snprintf(st->notice, sizeof(st->notice),
                      "Wake-on-LAN MAC set to %s.", st->cfg->wol_mac);
         } else {
@@ -855,12 +963,32 @@ static void osk_accept(ui_state_t *st) {
         return;
     }
     st->notice[0] = 0;
-    if (st->osk_target == SET_HOST) {
-        if (strcmp(st->cfg->host, st->osk_buf) != 0) {
-            snprintf(st->cfg->host, sizeof(st->cfg->host), "%s", st->osk_buf);
-            st->cfg->http_port = 47989;
-            st->host_dirty = 1;
+    if (st->osk_target == OSK_ADD_PC) {
+        /* In-place Add PC row: create (or re-select) the entry, then probe
+         * it right away so the status dot fills in; X on the row connects. */
+        if (config_pc_add(st->cfg, st->osk_buf, NULL, NULL) != 0) {
+            snprintf(st->notice, sizeof(st->notice),
+                     "Could not add that PC.");
+            return;
         }
+        save_cfg(st);
+        pcs_reseed(st);
+        st->sel_host = 0;
+        scan_start(st);
+        snprintf(st->notice, sizeof(st->notice),
+                 "PC added. Press X to connect to it.");
+        st->osk_active = 0;
+        return;
+    }
+    if (st->osk_target == SET_HOST) {
+        /* Typing the address of a known PC re-selects its entry; a new
+         * address becomes one (the Settings row edits the ACTIVE host,
+         * but the list must never desync from it). */
+        int changed = strcmp(st->cfg->host, st->osk_buf) != 0;
+        config_pc_add(st->cfg, st->osk_buf, NULL, NULL);
+        st->cfg->http_port = 47989;
+        if (changed)
+            st->host_dirty = 1;
         save_cfg(st);
         st->osk_active = 0;
         /* After writing host: reconnect when leaving the keyboard. */
@@ -876,8 +1004,8 @@ static void osk_accept(ui_state_t *st) {
 static void osk_input(ui_state_t *st, unsigned pr) {
     if (pr & MENU_BTN_UP)    st->osk_row = (st->osk_row + st->osk_rows - 1) % st->osk_rows;
     if (pr & MENU_BTN_DOWN)  st->osk_row = (st->osk_row + 1) % st->osk_rows;
-    if (pr & MENU_BTN_LEFT)  st->osk_col = (st->osk_col + OSK_COLS - 1) % OSK_COLS;
-    if (pr & MENU_BTN_RIGHT) st->osk_col = (st->osk_col + 1) % OSK_COLS;
+    if (pr & MENU_BTN_LEFT)  st->osk_col = (st->osk_col + st->osk_cols - 1) % st->osk_cols;
+    if (pr & MENU_BTN_RIGHT) st->osk_col = (st->osk_col + 1) % st->osk_cols;
     if (pr & MENU_BTN_CROSS) {
         size_t len = strlen(st->osk_buf);
         if (len + 1 < sizeof(st->osk_buf)) {
@@ -994,11 +1122,12 @@ static void apps_input(ui_state_t *st, unsigned pr) {
 }
 
 /* settings list geometry (shared by input + drawing).
- * Viewport: below the header, above the notice line. */
-#define SET_ROW_H       96
-#define SET_VIEW_Y0     216
-#define SET_VIEW_H      728 /* 216..944, above the 948 notice line */
-#define SET_VISIBLE_ROWS (SET_VIEW_H / SET_ROW_H) /* 7 full rows */
+ * Viewport: below the header, above the notice line. 112 px rows carry
+ * the label + value line and the (wrapped) contextual hint together. */
+#define SET_ROW_H       112
+#define SET_VIEW_Y0     232
+#define SET_VIEW_H      672 /* 232..904, above the status line */
+#define SET_VISIBLE_ROWS (SET_VIEW_H / SET_ROW_H) /* 6 full rows */
 
 static void settings_clamp_scroll(ui_state_t *st) {
     int top = st->set_scroll_target;
@@ -1092,10 +1221,17 @@ static void settings_input(ui_state_t *st, unsigned pr) {
             char path[512];
             snprintf(path, sizeof(path), "%s/debug.log", st->config_dir);
             log_set_file_enabled(c->enable_file_log ? 1 : 0, path);
+            if (c->enable_file_log)
+                LOGI("log: file logging enabled (session lines before this "
+                     "point were not captured)");
         }
         break;
     case SET_SHOW_STATS:  c->show_stats = !c->show_stats; break;
-    case SET_SURROUND:    c->surround51 = !c->surround51; break;
+    case SET_SURROUND:
+        /* Stereo -> 5.1 -> 7.1; the audio layer downmixes automatically
+         * when the TV/AVR refuses 8-channel output. */
+        c->surround_mode = (c->surround_mode + 1) % 3;
+        break;
     case SET_TOUCHPAD_MOUSE: c->touchpad_mouse = !c->touchpad_mouse; break;
     case SET_GYRO:        c->gyro_motion = !c->gyro_motion; break;
     case SET_EXIT:
@@ -1111,46 +1247,11 @@ static void settings_input(ui_state_t *st, unsigned pr) {
 
 /* --- drawing --- */
 
-static void draw_osk(ui_state_t *st, ui_surface_t *s) {
-    const int px = 480, py = 260, pw = 960, ph = 560;
-    ui_rect(s, px - 4, py - 4, pw + 8, ph + 8, COL_ACCENT);
-    ui_rect(s, px, py, pw, ph, COL_PANEL);
+/* layout helpers used by the Orbis shell below */
+static const char *set_row_hint(const ui_state_t *st, int row);
+static const char *active_app_name(const ui_state_t *st);
 
-    const char *title = (st->osk_target == SET_WOL_MAC)
-        ? "WAKE-ON-LAN MAC" : "PC IP ADDRESS";
-    ui_text(s, px + 32, py + 28, 3, COL_ACCENT, title);
-
-    /* Value with cursor */
-    char line[CONFIG_MAX_HOST + 2];
-    snprintf(line, sizeof(line), "%s_", st->osk_buf);
-    ui_rect(s, px + 32, py + 88, pw - 64, 44, COL_BG);
-    ui_text(s, px + 40, py + 98, 3, COL_TEXT, line);
-
-    /* Grid: 6 rows for the hex MAC keyboard (smaller cells), 4 for IP. */
-    const int rows = st->osk_rows;
-    const int cell = rows > 4 ? 60 : 80;
-    const int gx0 = px + pw / 2 - OSK_COLS * cell / 2;
-    const int gy0 = py + (rows > 4 ? 150 : 170);
-    for (int r = 0; r < rows; r++) {
-        for (int cidx = 0; cidx < OSK_COLS; cidx++) {
-            int x = gx0 + cidx * cell;
-            int y = gy0 + r * cell;
-            int sel = (r == st->osk_row && cidx == st->osk_col);
-            ui_rect(s, x, y, cell - 8, cell - 8, sel ? COL_SEL : COL_BG);
-            if (sel)
-                ui_rect(s, x, y + cell - 12, cell - 8, 4, COL_ACCENT);
-            char ch[2] = { osk_char_at(st, r, cidx), 0 };
-            ui_text(s, x + (cell - 8) / 2 - 12, y + (cell - 8) / 2 - 12, 3,
-                    sel ? COL_TEXT : COL_DIM, ch);
-        }
-    }
-
-    ui_text(s, px + 32, py + ph - 40, 2, COL_DIM,
-            rows > 4 ? "X add  [] backspace  O cancel  OPTIONS accept  (empty = off)"
-                     : "X add   [] backspace   O cancel   OPTIONS accept");
-}
-
-#include "ui_design.inc"
+#include "ui_orbis.inc"
 
 /* one-line contextual help for the selected row, drawn under the
  * list where the host-changed warning lives. Makes the WOL auto-detect
@@ -1181,91 +1282,70 @@ static const char *set_row_hint(const ui_state_t *st, int row) {
     }
 }
 
-static void draw_settings(ui_state_t *st, ui_surface_t *s) {
-    /* larger, scrollable list. The old layout crammed all 14 rows
-     * on screen at 52px/26px ("the text is kinda small"); rows are 96px now
-     * with 30px labels, 7 rows fit the viewport and the rest scroll - D-pad
-     * auto-repeat walks the list and the view eases to follow. */
-    int x = design_sidebar() ? 440 : 100;
-    int list_w = UI_W - x - 64;
-
-    for (int i = 0; i < VISIBLE_SETTINGS; i++) {
-        int row_y = SET_VIEW_Y0 + i * SET_ROW_H - st->set_scroll;
-        /* Only paint rows fully inside the viewport (no overdraw into the
-         * notice line while the ease slides rows through the bottom). */
-        if (row_y < SET_VIEW_Y0 - 1 || row_y + SET_ROW_H > SET_VIEW_Y0 + SET_VIEW_H + 1)
-            continue;
-        int sel = (i == st->sel_set);
-        if (sel)
-            ui_focus(s, x, row_y, list_w, SET_ROW_H - 12, 12, COL_SEL, 0);
-        ui_label(s, x + 32, row_y + (SET_ROW_H - 12) / 2 - 16, 30, sel,
-                 sel ? COL_TEXT : COL_DIM,
-                 k_set_names[k_visible_settings[i]]);
-        char val[192];
-        set_value_str(st, k_visible_settings[i], val, sizeof(val));
-        ui_label_fit(s, x + 700, row_y + (SET_ROW_H - 12) / 2 - 14, 28, 0,
-                     sel ? COL_ACCENT : COL_DIM, val, list_w - 740);
+/* --- PCs tab: the saved list, refined by the probe ----------------
+ *
+ * The tab renders the persisted [pcs] list (moonlight.ini) directly -
+ * MRU-first, up to 8 computers - so it appears instantly with zero
+ * network involved. The scan worker then refines each entry in place:
+ * one plain-HTTP /serverinfo probe per PC (milliseconds to a live
+ * host) sets its Online/Offline status and fills in the hostname. The
+ * in-place Add PC row creates entries; OPTIONS on a PC row forgets it
+ * behind a native confirmation dialog. Subnet-wide discovery was
+ * removed after three designs disproven on real hardware (see
+ * discovery.h); TRIANGLE re-checks every saved PC. */
+static void pcs_reseed(ui_state_t *st) {
+    st->nhosts = 0;
+    st->sel_host = 0;
+    for (int i = 0; i < st->cfg->pc_count && st->nhosts < MDNS_MAX_HOSTS;
+         i++) {
+        mdns_host_t *h = &st->hosts[st->nhosts++];
+        memset(h, 0, sizeof(*h));
+        snprintf(h->instance, sizeof(h->instance), "%s",
+                 st->cfg->pcs[i].name[0] ? st->cfg->pcs[i].name
+                                        : "Gaming PC");
+        snprintf(h->address, sizeof(h->address), "%s", st->cfg->pcs[i].host);
+        h->port = st->cfg->http_port;
+        h->online = -1; /* unknown until the probe lands */
     }
-
-    /* Scrollbar (only when there is something to scroll). */
-    int max_top = (VISIBLE_SETTINGS - SET_VISIBLE_ROWS) * SET_ROW_H;
-    if (max_top > 0) {
-        int track_x = UI_W - 44;
-        int track_h = SET_VIEW_H - 24;
-        ui_round_rect(s, track_x, SET_VIEW_Y0 + 12, 6, track_h, 3,
-                      COL_PANEL);
-        int thumb_h = track_h * SET_VISIBLE_ROWS / VISIBLE_SETTINGS;
-        int thumb_y = SET_VIEW_Y0 + 12 +
-                      (int64_t)track_h * st->set_scroll / max_top;
-        if (thumb_y + thumb_h > SET_VIEW_Y0 + 12 + track_h)
-            thumb_y = SET_VIEW_Y0 + 12 + track_h - thumb_h;
-        ui_round_rect(s, track_x, thumb_y, 6, thumb_h, 3, COL_ACCENT);
-    }
-
-    if (st->host_dirty)
-        ui_label_fit(s, x + 32, 952, 22, 0, COL_WARN,
-                     "Host changed: open Games and press TRIANGLE to reconnect.",
-                     list_w);
-    else if (!st->notice[0]) {
-        const char *hint = set_row_hint(st, k_visible_settings[st->sel_set]);
-        if (hint)
-            ui_label_fit(s, x + 32, 952, 22, 0, COL_DIM, hint, list_w);
+    /* A host without a list entry (config_load migrates files, but a
+     * hand-built cfg - the host harness, early boot paths - still carries
+     * only the flat host): seed it as the single row, exactly like the
+     * pre-list tab did. */
+    if (st->nhosts == 0 && st->cfg->host[0]) {
+        mdns_host_t *h = &st->hosts[st->nhosts++];
+        memset(h, 0, sizeof(*h));
+        snprintf(h->instance, sizeof(h->instance), "Gaming PC");
+        snprintf(h->address, sizeof(h->address), "%s", st->cfg->host);
+        h->port = st->cfg->http_port;
+        h->online = -1;
     }
 }
 
-/* --- PCs tab: saved host first, probe refines it ----------------
- *
- * The list is seeded INSTANTLY from cfg->host — the PC the user last
- * connected to is always on the tab, zero network involved. The scan
- * worker then refines the entry: one plain-HTTP /serverinfo probe
- * (~250 ms to a live host) sets the online status and fills in the
- * PC's hostname. Subnet-wide discovery was removed after three
- * designs disproven on real hardware (see discovery.h); TRIANGLE re-checks the
- * saved PC. */
-static void pcs_seed_saved(ui_state_t *st) {
-    if (!st->cfg->host[0] || !mdns_valid_ipv4(st->cfg->host))
-        return;
-    if (st->nhosts >= MDNS_MAX_HOSTS)
-        return;
-    for (int i = 0; i < st->nhosts; i++)
-        if (!strcmp(st->hosts[i].address, st->cfg->host))
-            return; /* already listed */
-    mdns_host_t *h = &st->hosts[st->nhosts++];
-    memset(h, 0, sizeof(*h));
-    snprintf(h->instance, sizeof(h->instance), "Gaming PC");
-    snprintf(h->address, sizeof(h->address), "%s", st->cfg->host);
-    h->port = st->cfg->http_port;
-    h->online = -1; /* unknown until the probe lands */
+/* Saved MAC of the PC a row points at (its own entry first, the live
+ * server's report as a fallback while a first connect is pending). */
+static const char *pcs_row_mac(const ui_state_t *st, const char *host) {
+    for (int i = 0; i < st->cfg->pc_count; i++)
+        if (!strcmp(st->cfg->pcs[i].host, host) && st->cfg->pcs[i].mac[0])
+            return st->cfg->pcs[i].mac;
+    if (st->server && st->server->host_mac[0] &&
+        !strcmp(st->server->address, host))
+        return st->server->host_mac;
+    return "";
 }
 
 static void scan_start(ui_state_t *st) {
     if (st->scan)
         return;
-    st->scan = scan_job_begin(st->cfg->host[0] ? st->cfg->host : NULL);
+    const char *hosts[MDNS_MAX_HOSTS];
+    int n = 0;
+    for (int i = 0; i < st->nhosts && n < MDNS_MAX_HOSTS; i++)
+        hosts[n++] = st->hosts[i].address;
+    if (n == 0)
+        return; /* nothing saved yet: the Add PC row owns that moment */
+    st->scan = scan_job_begin_list(hosts, n);
     if (st->scan) {
-        LOGI("ui: network scan started (hint='%s')",
-             st->cfg->host[0] ? st->cfg->host : "-");
-        snprintf(st->notice, sizeof(st->notice), "Checking for your PC...");
+        LOGI("ui: network scan started (%d saved PCs)", n);
+        snprintf(st->notice, sizeof(st->notice), "Checking for your PCs...");
     }
 }
 
@@ -1309,12 +1389,71 @@ static int scan_poll(ui_state_t *st) {
     if (scan_job_done(st->scan)) {
         scan_job_finish(&st->scan);
         LOGI("ui: network scan finished (%d hosts)", st->nhosts);
+        /* Persist refined hostnames into the saved list (the probe's
+         * /serverinfo carries them) and report the outcome as a toast:
+         * a finished scan must never read as a dead button again. */
+        int online = 0;
+        for (int i = 0; i < n; i++) {
+            if (found[i].online == 1) {
+                online++;
+                if (found[i].instance[0] &&
+                    strcmp(found[i].instance, "Gaming PC") != 0)
+                    config_pc_note_name(st->cfg, found[i].address,
+                                         found[i].instance);
+            }
+        }
+        if (st->cfg->pc_count > 0)
+            save_cfg(st);
+        if (st->nhosts == 0)
+            snprintf(st->notice, sizeof(st->notice),
+                     "No PCs found - add one with the X row.");
+        else if (online == 0)
+            snprintf(st->notice, sizeof(st->notice),
+                     "No PCs answering. Check they are on, then press "
+                     "TRIANGLE.");
+        else
+            snprintf(st->notice, sizeof(st->notice),
+                     "%d of %d PCs online.", online, st->nhosts);
         redraw = 1;
     }
     return redraw;
 }
 
+/* Selectable rows on the PCs tab: the saved PCs plus the in-place Add
+ * row at the end (always present, so the empty state has a target too). */
+/* OPTIONS on a PC row: forget it behind a native confirmation dialog. */
+static void pcs_forget_confirm(ui_state_t *st, unsigned pr) {
+    if (pr & MENU_BTN_CROSS) {
+        int idx = st->confirm_index;
+        st->confirm_active = 0;
+        if (idx >= 0 && idx < st->nhosts) {
+            char host[32];
+            snprintf(host, sizeof(host), "%s", st->hosts[idx].address);
+            int left = st->cfg->pc_count - 1;
+            int pc_idx = -1;
+            for (int i = 0; i < st->cfg->pc_count; i++)
+                if (!strcmp(st->cfg->pcs[i].host, host)) {
+                    pc_idx = i;
+                    break;
+                }
+            if (pc_idx >= 0)
+                config_pc_remove(st->cfg, pc_idx);
+            save_cfg(st);
+            pcs_reseed(st);
+            LOGI("ui: forgot PC %s (%d left)", host, left);
+            snprintf(st->notice, sizeof(st->notice),
+                     "Forgot PC %s (%d left).", host, left);
+        }
+    } else if (pr & MENU_BTN_CIRCLE) {
+        st->confirm_active = 0;
+    }
+}
+
 static void pcs_input(ui_state_t *st, unsigned pr) {
+    if (st->confirm_active) {
+        pcs_forget_confirm(st, pr);
+        return;
+    }
     if (pr & MENU_BTN_TRIANGLE) {
         if (st->scan) {
             snprintf(st->notice, sizeof(st->notice), "Still checking... (%s)",
@@ -1325,14 +1464,12 @@ static void pcs_input(ui_state_t *st, unsigned pr) {
     }
     /* SQUARE sends a Wake-on-LAN burst to the selected PC. Pure
      * UDP sendto() calls - cannot hit the console's TCP connect stall.
-     * the saved MAC is normally auto-detected (paired HTTPS
+     * Each PC carries its own auto-detected MAC (paired HTTPS
      * serverinfo); the server-reported value is a fallback before the
      * first successful connect of this boot. */
-    if ((pr & MENU_BTN_SQUARE) && st->nhosts) {
+    if ((pr & MENU_BTN_SQUARE) && st->sel_host < st->nhosts) {
         mdns_host_t *h = &st->hosts[st->sel_host];
-        const char *mac = st->cfg->wol_mac;
-        if (!mac[0] && st->server && st->server->host_mac[0])
-            mac = st->server->host_mac;
+        const char *mac = pcs_row_mac(st, h->address);
         if (!mac[0]) {
             snprintf(st->notice, sizeof(st->notice),
                      "To wake this PC, connect to it once - its MAC is then "
@@ -1346,92 +1483,54 @@ static void pcs_input(ui_state_t *st, unsigned pr) {
                      h->address);
         }
     }
-    if (st->nhosts && (pr & MENU_BTN_UP))
-        st->sel_host = (st->sel_host + st->nhosts - 1) % st->nhosts;
-    if (st->nhosts && (pr & MENU_BTN_DOWN))
-        st->sel_host = (st->sel_host + 1) % st->nhosts;
+    /* OPTIONS on a PC row asks before forgetting it (the list is the
+     * only copy of that machine; a reflex OPTIONS press must not wipe
+     * it). The Add row ignores OPTIONS. */
+    if ((pr & MENU_BTN_OPTIONS) && st->sel_host < st->nhosts) {
+        st->confirm_active = 1;
+        st->confirm_index = st->sel_host;
+    }
+    if (pr & MENU_BTN_UP)
+        st->sel_host = (st->sel_host + PCS_ROWS(st) - 1) % PCS_ROWS(st);
+    if (pr & MENU_BTN_DOWN)
+        st->sel_host = (st->sel_host + 1) % PCS_ROWS(st);
     if (pr & MENU_BTN_CROSS) {
-        if (st->nhosts) {
-            mdns_host_t *h = &st->hosts[st->sel_host];
-            snprintf(st->cfg->host, sizeof(st->cfg->host), "%s", h->address);
-            st->cfg->http_port = h->port;
+        if (st->sel_host < st->nhosts) {
+            /* A PC row: make it the active, most-recently-used machine and
+             * reconnect to it. */
+            int pc_idx = -1;
+            for (int i = 0; i < st->cfg->pc_count; i++)
+                if (!strcmp(st->cfg->pcs[i].host,
+                            st->hosts[st->sel_host].address)) {
+                    pc_idx = i;
+                    break;
+                }
+            if (pc_idx >= 0)
+                config_pc_touch(st->cfg, pc_idx);
+            st->cfg->http_port = st->hosts[st->sel_host].port;
             save_cfg(st);
             st->result = UI_MENU_RECONNECT;
-        } else if (st->server) {
-            /* Already connected: X just jumps to the games grid instead of
-             * forcing a full reconnect round trip. */
-            st->tab = TAB_APPS;
-        } else if (st->cfg->host[0]) {
-            st->result = UI_MENU_RECONNECT;
-        } else { st->tab = TAB_SETTINGS; st->sel_set = 0; osk_open(st, SET_HOST); }
-    }
-}
-
-static void draw_pcs(ui_state_t *st, ui_surface_t *s) {
-    int x=design_sidebar()?440:100;
-    ui_label(s, x+24, 250, 36, 1, COL_TEXT, "Your computers");
-    ui_label(s, x+24, 310, 26, 0, COL_DIM, "The PC you connect to is remembered here.");
-    if (st->scan) {
-        /* Live check status (PS4-style quiet hint line). */
-        char line[96];
-        snprintf(line, sizeof(line), "Checking... %s",
-                 st->scan_phase[0] ? st->scan_phase : "working");
-        ui_label(s, x+24, 356, 22, 0, COL_ACCENT, line);
-    } else if (!st->nhosts && !st->cfg->host[0]) {
-        ui_label(s, x+24, 356, 22, 0, COL_DIM,
-                 "Enter your PC's IP address to add it.");
-    }
-    if (!st->nhosts) {
-        ui_round_rect(s, x, 380, UI_W-x-64, 200, 14, COL_PANEL);
-        ui_label(s, x+36, 415, 32, 1, COL_TEXT, "Add your gaming PC");
-        ui_label(s, x+36, 475, 26, 0, COL_DIM,
-                 "X enter IP    TRIANGLE check again");
-        return;
-    }
-    if (!st->scan && (st->cfg->wol_mac[0] ||
-                      (st->server && st->server->host_mac[0]))) {
-        ui_label(s, x+24, 356, 22, 0, COL_DIM,
-                 "SQUARE sends a Wake-on-LAN packet to the selected PC");
-    }
-    int first = st->sel_host >= 7 ? st->sel_host - 6 : 0;
-    for (int i = first; i < st->nhosts && i < first + 7; i++) {
-        int y = 390 + (i-first) * 78;
-        char name[64], line[80];
-        const char *end = strstr(st->hosts[i].instance, "._nvstream");
-        size_t len = end ? (size_t)(end - st->hosts[i].instance) : strlen(st->hosts[i].instance);
-        if (len >= sizeof(name)) len = sizeof(name)-1;
-        memcpy(name, st->hosts[i].instance, len); name[len] = 0;
-        int sel = i == st->sel_host;
-        ui_round_rect(s, x, y-12, UI_W-x-64, 70, 10, sel ? COL_SEL : COL_PANEL);
-        ui_icon(s,x+24,y+4,36,0,sel ? COL_TEXT : COL_DIM);
-        ui_label_fit(s, x+86, y, 30, 1, COL_TEXT, name, 640);
-        /* Status: live session > probe verdict. */
-        int connected = st->server && st->server->paired &&
-                       !strcmp(st->server->address, st->hosts[i].address);
-        int online = st->hosts[i].online;
-        const char *status = connected ? "Connected"
-                          : online == 1 ? "Online"
-                          : online == 0 ? "Offline"
-                          : "Checking...";
-        uint32_t dot = connected || online == 1 ? 0xff42cc94
-                     : online == 0 ? 0xffd9a441 : COL_DIM;
-        ui_circle(s, x+780, y+17, 8, dot);
-        ui_label(s, x+802, y+6, 24, 0,
-                 connected ? COL_ACCENT : online == 1 ? COL_TEXT : COL_DIM,
-                 status);
-        snprintf(line, sizeof(line), "%s:%u", st->hosts[i].address, (unsigned)st->hosts[i].port);
-        ui_label(s, UI_W-420, y+6, 24, 0, COL_DIM, line);
+        } else {
+            /* The Add row: enter a new PC's IP in place. */
+            osk_open(st, OSK_ADD_PC);
+        }
     }
 }
 
 static void draw_all(ui_state_t *st, ui_surface_t *s) {
-    design_shell(st,s);
-    if(st->tab==TAB_APPS)design_apps(st,s);
-    else if(st->tab==TAB_PCS)draw_pcs(st,s);
-    else draw_settings(st,s);
-    design_footer(st,s);
-    if(st->notice[0])ui_label_fit(s,design_sidebar()?440:64,948,20,0,COL_WARN,st->notice,1300);
-    if(st->osk_active)draw_osk(st,s);
+    orbis_shell(st, s);
+    if (st->tab == TAB_APPS)
+        orbis_games(st, s);
+    else if (st->tab == TAB_PCS)
+        orbis_pcs(st, s);
+    else
+        orbis_settings(st, s);
+    orbis_footer(st, s);
+    orbis_toast(st, s);
+    if (st->osk_active)
+        orbis_osk(st, s);
+    else if (st->confirm_active)
+        orbis_confirm(st, s);
 }
 int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) {
     ui_theme_set(cfg->ui_theme);
@@ -1465,11 +1564,12 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
     /* Cached list first, BEFORE the first paint: the grid is usable the
      * instant the menu appears; the network refresh runs in the
      * background and lands a moment later. Same for the PCs tab: the
-     * saved host is listed instantly (no network), and the probe only
-     * refines its status. */
+     * saved list (up to 8 computers, MRU-first) is rendered instantly
+     * (no network), and the probe only refines the statuses. */
     apps_load_cache(&st);
-    pcs_seed_saved(&st);
+    pcs_reseed(&st);
     preselect_app(&st);
+    st.sel_f = (double)st.sel_app;
 
     /* Offscreen staging: drawing NEVER touches the on-screen buffer. */
     size_t stage_pitch = (size_t)UI_W * 4u;
@@ -1513,6 +1613,14 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
     input_menu_absorb();
 
     int dirty = 1;
+    int anim = 0; /* a continuous animation source stepped this pass: the
+                   * loop paces at 1 ms instead of 8 ms so the draw cadence
+                   * is the display's, not the sleep's (the fixed 8 ms
+                   * sleep sat ON TOP of the vsync-bound present and
+                   * capped the row far below 60 fps even after the
+                   * raster cost was fixed). */
+    unsigned long long spin_tick = 0; /* loading-spinner redraw throttle */
+    unsigned long long glide_ms = 0;  /* hero glide last-step timestamp */
 
     int present_fail = 0; /* consecutive present failures (app suspended?) */
     int grace = 45; /* ~0.7 s without accepting launch */
@@ -1538,7 +1646,11 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
         if (pr) {
             if (st.osk_active)
                 osk_input(&st, pr);
+            else if (st.confirm_active)
+                pcs_input(&st, pr); /* the modal owns every button */
             else if (pr & (MENU_BTN_L1 | MENU_BTN_R1)) {
+                st.tab_dir = (pr & MENU_BTN_R1) ? 1 : -1;
+                st.tab_anim_ms = menu_now_ms();
                 st.tab = (ui_tab_t)((st.tab + ((pr & MENU_BTN_R1) ? 1 : 2)) % 3);
                 /* entering Settings snaps the list to the selection
                  * (no visible easing from a stale scroll position). */
@@ -1554,12 +1666,15 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
             else
                 settings_input(&st, pr);
             dirty = 1;
+            anim = 1; /* an input may start a glide/slide right after:
+                       * do not pad the reaction with an 8 ms sleep */
         }
 
         /* Background work landing: apply refresh results / new art. */
         if (apps_job_poll(&st)) {
             if (st.sel_app >= st.napps)
                 preselect_app(&st);
+            st.sel_f = (double)st.sel_app; /* list changed: no glide */
             dirty = 1;
         }
         if (ui_art_pump())
@@ -1578,11 +1693,79 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
             }
         }
 
+        /* Working spinner: while a refresh is pending the Games tab
+         * shows the system spinner, which only turns if frames advance.
+         * Tick at ~25 fps (a turn every ~0.64 s) instead of every loop
+         * pass so the console keeps its present-on-change discipline. */
+        if (st.refresh_pending && menu_now_ms() >= spin_tick + 40) {
+            spin_tick = menu_now_ms();
+            dirty = 1;
+            anim = 1;
+        }
+
         /* Focus-settle animation: keep redrawing for a moment after a
          * selection change so the focused tile eases into place instead
          * of snapping (theme card layouts read st->focus_anim_start). */
-        if (menu_now_ms() < st.focus_anim_start + 220)
+        if (menu_now_ms() < st.focus_anim_start + 220) {
             dirty = 1;
+            anim = 1;
+        }
+
+        /* Toast lifecycle: fire when the notice changes, keep drawing
+         * while it is on screen (event view; the footer keeps the text). */
+        if (strcmp(st.notice, st.status_prev) != 0) {
+            snprintf(st.status_prev, sizeof(st.status_prev), "%s",
+                     st.notice);
+            st.toast_ms = st.notice[0] ? menu_now_ms() : 0;
+            dirty = 1;
+        }
+        if (st.toast_ms && menu_now_ms() < st.toast_ms + TOAST_MS + 260) {
+            dirty = 1;
+            anim = 1;
+        }
+
+        /* Tab-switch slide. */
+        if (st.tab_anim_ms && menu_now_ms() < st.tab_anim_ms + 190) {
+            dirty = 1;
+            anim = 1;
+        }
+
+        /* Hero-row easing toward the selection. Time-based: the glide
+         * covers the same distance in the same wall-clock time whatever
+         * the present cadence is (60 Hz vs a console hiccup) - a fixed
+         * per-frame fraction sped up and slowed down with the frame
+         * rate. tau = 36 ms: the glide settles in tau x ln(1/0.004) ≈
+         * 200 ms end to end. tau = 23 gave ~127 ms, which read as a
+         * touch too quick once the 60 fps rework landed and the stutter
+         * was gone; 36 ms matches the reference dashboard's tempo. The
+         * +0.75 distance clamp
+         * bounds huge jumps. */
+        if (st.tab == TAB_APPS && st.napps) {
+            double d = (double)st.sel_app - st.sel_f;
+            if (d > 0.75)
+                d = 0.75;
+            if (d < -0.75)
+                d = -0.75;
+            if (d > 0.004 || d < -0.004) {
+                unsigned long long gnow = menu_now_ms();
+                if (!glide_ms)
+                    glide_ms = gnow;
+                double dt = (double)(gnow - glide_ms);
+                glide_ms = gnow;
+                if (dt > 100.0) /* tab was away: no teleport on return */
+                    dt = 100.0;
+                double frac = 1.0 - exp(-dt / 36.0);
+                st.sel_f += d * frac;
+                dirty = 1;
+                anim = 1;
+            } else if (st.sel_f != (double)st.sel_app) {
+                st.sel_f = (double)st.sel_app;
+                glide_ms = 0;
+                dirty = 1; /* final snap frame */
+            }
+        } else {
+            glide_ms = 0; /* reset while other tabs are active */
+        }
 
         /* settings list scroll easing - ~1/3 of the remaining
          * distance per frame (the earlier ~14% rate
@@ -1599,6 +1782,7 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
                 step = d;
             st.set_scroll += step;
             dirty = 1;
+            anim = 1;
         }
 
         /* Exit NOW: don't redraw or flip (SubmitFlip VSYNC can hang
@@ -1628,7 +1812,8 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
                 ui_hide_splash_once();
             }
         }
-        usleep(present_fail >= 30 ? 50000 : 8000);
+        usleep(present_fail >= 30 ? 50000 : (anim ? 1000 : 8000));
+        anim = 0;
     }
 
     LOGI("ui: freeing staging...");

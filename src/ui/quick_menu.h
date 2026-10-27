@@ -23,11 +23,13 @@ typedef enum {
                              * then back to the client menu */
 } qm_action_t;
 
-/* Bitrate bounds/step mirror the Settings row (SET_BITRATE) so both UIs
- * agree on the legal range. */
+/* Bitrate bounds mirror the Settings row (SET_BITRATE). Two step sizes:
+ * LEFT/RIGHT (and CROSS) nudge by 1000 kbps for fine trimming, L1/R1
+ * jump by 5000 - the Settings-row step - for the long haul. */
 #define QM_BITRATE_MIN  5000
 #define QM_BITRATE_MAX  50000
-#define QM_BITRATE_STEP 5000
+#define QM_BITRATE_STEP 1000
+#define QM_BITRATE_STEP_BIG 5000
 
 /* Row order = display order. */
 #define QM_ROW_TOUCHPAD  0
@@ -57,11 +59,11 @@ void qm_close(int *bitrate_out, int *changed_out);
 int qm_is_open(void);
 
 /* Feed pressed edges (MENU_BTN_* from input_menu_poll). UP/DOWN move the
- * selection (wrap), LEFT/RIGHT and CROSS step the bitrate row down/up,
- * CROSS activates the selected row, CIRCLE requests close. Returns the
- * action for the caller to execute (the state update already happened
- * for toggle rows, so the caller applies the same value to the live
- * config it shows on screen). */
+ * selection (wrap), LEFT/RIGHT and CROSS step the bitrate row down/up by
+ * the fine step, L1/R1 by the big step, CROSS activates the selected row,
+ * CIRCLE requests close. Returns the action for the caller to execute
+ * (the state update already happened for toggle rows, so the caller applies
+ * the same value to the live config it shows on screen). */
 qm_action_t qm_input(unsigned pressed);
 
 /* Snapshot for the renderer (video thread). */

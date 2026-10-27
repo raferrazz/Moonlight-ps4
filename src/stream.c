@@ -199,6 +199,21 @@ static int resolve_app_display(gs_server_t *server, int app_id,
  * still waiting for it. */
 #define CONNECT_BUDGET_MS 12000
 
+/* Pairing retry policy: when Sunshine answers a pairing phase with an
+ * outright error - most commonly because no PIN has been entered on
+ * the host yet - the whole 5-phase handshake fails in milliseconds.
+ * Instead of dumping the user back at the menu, keep the PIN screen up
+ * and retry every PAIR_RETRY_GAP_MS until PAIR_BUDGET_MS runs out:
+ * the moment the PIN is entered on the PC, the next attempt completes
+ * the handshake. (Observed on console: three 30-ms "Pairing
+ * failed" round trips before the PIN page was even open, then a
+ * fourth connect worked because the PIN happened to be in by then.)
+ * Per-request timeouts stay at 120 s inside gs_pair_ex - current
+ * Sunshine HOLDS the getservercert request until its PIN entry, and
+ * that wait must never be cut short client-side. */
+#define PAIR_RETRY_GAP_MS 2000
+#define PAIR_BUDGET_MS   120000
+
 /* when a connect fails on a host that has a Wake-on-LAN MAC saved,
  * send a wake burst so the PC can boot while the user reads the error -
  * the classic "PC asleep" case then needs one retry, not a walk to the
@@ -224,8 +239,9 @@ static void stream_sync_wol_mac(app_config_t *cfg, const char *config_dir) {
         return;
     if (strcmp(s_server.host_mac, cfg->wol_mac) != 0 || !cfg->wol_auto) {
         int changed = strcmp(s_server.host_mac, cfg->wol_mac) != 0;
-        snprintf(cfg->wol_mac, sizeof(cfg->wol_mac), "%s", s_server.host_mac);
-        cfg->wol_auto = true;
+        /* Stores the value on the PC's own [pcs] entry and mirrors the
+         * flat wol_mac/wol_auto fields in one step. */
+        config_pc_note_mac(cfg, s_server.host_mac);
         if (config_dir && config_save(cfg, config_dir) == 0)
             LOGI("stream: Wake-on-LAN MAC %s: %s (saved, auto)",
                  changed ? "auto-detected" : "source updated", cfg->wol_mac);
@@ -280,14 +296,6 @@ static void *connect_job_thread(void *arg) {
     return NULL;
 }
 
-static uint32_t connect_mix(uint32_t under, uint32_t over, int alpha) {
-    unsigned inv = 255 - (unsigned)alpha;
-    return 0xff000000u |
-        (((((under >> 16) & 255) * inv + ((over >> 16) & 255) * (unsigned)alpha) / 255) << 16) |
-        (((((under >> 8) & 255) * inv + ((over >> 8) & 255) * (unsigned)alpha) / 255) << 8) |
-        (((under & 255) * inv + (over & 255) * (unsigned)alpha) / 255);
-}
-
 /* Animated "Connecting" screen. Returns when the job is done, the user
  * pressed CIRCLE, or the budget ran out. */
 static void connect_screen_run(const char *host, connect_job_t *j,
@@ -329,29 +337,24 @@ static void connect_screen_run(const char *host, connect_job_t *j,
         ui_theme_background(&s);
         ui_text(&s, 80, 250, 3, ui_theme_current()->dim, "MOONLIGHT");
         ui_label_fit(&s, 80, 310, 60, 1, ui_theme_current()->text, host, 1760);
-        ui_label_fit(&s, 80, 450, 30, 0, ui_theme_current()->accent,
+        ui_label_fit(&s, 80, 450, 30, 0, ui_theme_current()->text,
                      "Connecting to Sunshine...", 1760);
-        {
-            static const int spin_dx[8] = {1024, 724, 0, -724, -1024, -724, 0, 724};
-            static const int spin_dy[8] = {0, 724, 1024, 724, 0, -724, -1024, -724};
-            int cx = W / 2, cy = 690, radius = 40;
-            int slot = (frame / 2) % 8;
-            for (int k = 0; k < 8; k++) {
-                int pos = (slot + k) & 7;
-                int alpha = 255 - k * 28;
-                ui_circle(&s, cx + radius * spin_dx[pos] / 1024,
-                          cy + radius * spin_dy[pos] / 1024, 7,
-                          connect_mix(ui_theme_current()->bg,
-                                      ui_theme_current()->accent, alpha));
-            }
-        }
+        /* shared system spinner (same indicator as the menu + launch) */
+        ui_spinner(&s, W / 2, 690, 40, frame, ui_theme_current()->accent);
         unsigned long long elapsed_s = (stream_now_ms() - start) / 1000u;
         char line[96];
         snprintf(line, sizeof(line), "%llu s", elapsed_s);
-        ui_text(&s, 80, H - 130, 2, ui_theme_current()->dim, line);
-        ui_icon(&s, W - 300, H - 118, 38, 6, 0xffff727d);
-        ui_label(&s, W - 244, H - 122, 26, 0, ui_theme_current()->text,
-                 "Cancel");
+        /* Quiet during the first second - "0 s" reads like an error
+         * code next to a working spinner (same rule as launch). */
+        if (elapsed_s >= 1)
+            ui_text(&s, 80, H - 130, 2, ui_theme_current()->dim, line);
+        int ccw = ui_ps_btn_w(38, PSBTN_CIRCLE);
+        ui_ps_btn(&s, W - 300, H - 118, 38, PSBTN_CIRCLE, 255);
+        /* Label rides the big chip's midline (ink-core centered; the old
+         * -4 offset sat the text 7 px above the chip's center). */
+        ui_label(&s, W - 300 + ccw + 20,
+                 H - 118 + 38 / 2 - ui_label_ink_cy(26, 0), 26, 0,
+                 ui_theme_current()->text, "Cancel");
 
         (void)video_ui_present(staging, (int)pitch);
         frame++;
@@ -464,15 +467,34 @@ static int stream_connect(app_config_t *cfg, const char *config_dir) {
         snprintf(pin_line, sizeof(pin_line), "PIN: %s", pin);
         snprintf(line, sizeof(line), "Enter the PIN in Sunshine (%s)", cfg->host);
         ui_show_status("PAIR", pin_line, line);
-        LOGI(">>> PAIRING PIN=%s  -> https://%s:47990/pin  (timeout 120s)",
-             pin, cfg->host);
+        LOGI(">>> PAIRING PIN=%s  -> https://%s:47990/pin  (budget %d s)",
+             pin, cfg->host, PAIR_BUDGET_MS / 1000);
 
-        /* gs_pair carries the 120 s budget per request now; the
-         * host answered serverinfo moments ago, so the PIN phase cannot
-         * hit an unbounded connect. */
-        int pair_rc = gs_pair(&s_server, pin);
-        LOGI("gs_pair => %d (%s)", pair_rc,
-             pair_rc == GS_OK ? "ok" : (gs_error ? gs_error : "?"));
+        /* Pairing waits for the user, not the other way round: retry
+         * inside the budget so whatever moment the PIN gets entered on
+         * the PC, the next attempt finishes the handshake (see the
+         * PAIR_RETRY defines above for the console-report story).
+         * Only the healable failures loop - the server saying "no PIN
+         * yet" or a transport hiccup. A game running on the host
+         * (GS_WRONG_STATE) or a malformed request (GS_INVALID) will
+         * not fix itself in 2 s; those surface their message at once. */
+        unsigned long long pair_deadline = stream_now_ms() + PAIR_BUDGET_MS;
+        int pair_rc = GS_FAILED;
+        int attempt = 0;
+        for (;;) {
+            attempt++;
+            pair_rc = gs_pair_ex(&s_server, pin, 120000);
+            LOGI("gs_pair attempt %d => %d (%s)", attempt, pair_rc,
+                 pair_rc == GS_OK ? "ok" : (gs_error ? gs_error : "?"));
+            if (pair_rc == GS_OK)
+                break;
+            if (pair_rc != GS_FAILED && pair_rc != GS_ERROR &&
+                pair_rc != GS_IO_ERROR)
+                break;
+            if (stream_now_ms() >= pair_deadline)
+                break;
+            usleep(PAIR_RETRY_GAP_MS * 1000);
+        }
         if (pair_rc != GS_OK) {
             ui_menu_set_notice("Pairing failed. Connect again and enter the PIN in Sunshine.");
             ui_show_status("ERROR", "Pairing failed",
@@ -583,6 +605,9 @@ static int run_launch_threaded(app_config_t *cfg, int app_id, int fn,
 static int stream_reconnect(app_config_t *cfg, int app_id,
                             const char *display) {
     char reason[160];
+    int woke = 0; /* one wake burst per drop episode (a sleeping host
+                   * never answers; two bursts change nothing but spam the
+                   * network) */
     for (int attempt = 1; ; attempt++) {
         int rrc = run_launch_threaded(cfg, app_id, 1, display,
                                       reason, sizeof(reason));
@@ -610,6 +635,16 @@ static int stream_reconnect(app_config_t *cfg, int app_id,
                      gs_error ? gs_error : "connection error");
         }
         if (attempt >= 3) {
+            /* Retries exhausted: if this PC has a Wake-on-LAN MAC saved,
+             * send ONE burst before the fail prompt so a PC that dozed
+             * off mid-stream can boot while the user reads the screen -
+             * the wake appends to the reason, never replacing it. */
+            if (!woke && connect_failed_wol(cfg, 0)) {
+                woke = 1;
+                size_t len = strlen(reason);
+                snprintf(reason + len, sizeof(reason) - len,
+                         " A wake packet was sent to your PC.");
+            }
             int choice = ui_launch_fail_screen_run(display, reason, 0);
             if (choice == UI_LAUNCH_FAIL_BACK)
                 return -1; /* X retries the loop; CIRCLE ends it */
@@ -728,11 +763,14 @@ restart:
          cfg->prefer_hw ? "true" : "false", decoder_reason);
     s_ar = audio_callbacks_orbis;
 
-    /* stereo by default; 5.1 when opted in (Settings). The audio
-     * renderer downmixes to stereo if 8ch output is unavailable, so this
-     * can never end in silence. */
-    cfg->stream.audioConfiguration = cfg->surround51
-        ? AUDIO_CONFIGURATION_51_SURROUND : AUDIO_CONFIGURATION_STEREO;
+    /* Stereo by default; 5.1 / 7.1 when opted in (Settings tri-state).
+     * The audio renderer opens an 8-channel port for both and downmixes
+     * (7.1 -> 5.1 -> stereo) if the TV/AVR refuses 8-channel output, so
+     * this can never end in silence. */
+    cfg->stream.audioConfiguration =
+        cfg->surround_mode == 2 ? AUDIO_CONFIGURATION_71_SURROUND
+        : cfg->surround_mode == 1 ? AUDIO_CONFIGURATION_51_SURROUND
+                                  : AUDIO_CONFIGURATION_STEREO;
     /* DS4 touchpad as a mouse (Settings toggle, default on). */
     input_set_touchpad_mouse(cfg->touchpad_mouse);
     /* gyro/accelerometer motion toggle (Settings, default on). */

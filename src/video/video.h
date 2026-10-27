@@ -75,9 +75,34 @@ typedef struct {
     float rx_mbps;      /* measured encoded-video bitrate (Mbit/s) */
     float frame_ms[VIDEO_STATS_HISTORY]; /* delivery interval per frame, oldest..newest */
     int frame_count;                     /* valid entries in frame_ms */
+    int target_fps;        /* session fps the budget line + verdicts are relative to (0 = unknown) */
+    unsigned dropped_window; /* frames skipped (stale/backlog) inside the window */
+    unsigned session_seq;    /* bumped per video_stats_begin_session (one-time warnings key off it) */
 } video_live_stats_t;
 
+/* Latch the session fps for the overlay's budget line + verdict colors.
+ * Called by the decoders' setup (redrawRate). */
+void video_stats_set_target_fps(int fps);
+
 void video_stats_get_live(video_live_stats_t *out);
+
+/* Frame-staleness window in microseconds: a queued AU older than 1.5
+ * frame periods is late and skips present (Decode still runs, so H.264
+ * references stay intact). The window scales with the session fps - the
+ * old fixed 33 ms was wrong at both ends: at 60 fps it tolerated a whole
+ * extra frame of queue age, and on a 29.97 Hz host stream (NTSC "30")
+ * it sat below the frame period and dropped on-time frames. Bounded to
+ * 25..100 ms so a bogus redrawRate can never collapse it. */
+static inline int64_t video_stale_window_us(int session_fps) {
+    if (session_fps <= 0 || session_fps > 240)
+        return 33000;
+    int64_t w = (int64_t)1500000 / session_fps;
+    if (w < 25000)
+        w = 25000;
+    if (w > 100000)
+        w = 100000;
+    return w;
+}
 
 #ifdef __ORBIS__
 /* workers <= 0 keeps the default. nt_pref: -1 auto (from the framebuffer

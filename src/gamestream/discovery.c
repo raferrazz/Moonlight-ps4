@@ -185,7 +185,10 @@ struct scan_job {
     int done;
     int abandoned;
     scan_results_t res;
-    char hint_host[64];
+    /* Probe list: every saved PC, in the order the caller passed (the
+     * PCs tab hands them over most-recently-used first). */
+    char probe[MDNS_MAX_HOSTS][16];
+    int nprobe;
 };
 
 static void scan_add(scan_results_t *r, const char *ip, unsigned short port,
@@ -398,37 +401,41 @@ static int probe_host(const char *ip, char *name_out, size_t name_cap) {
 
 /* --- the scan thread ----------------------------------------------
  *
- * hint-only. The earlier candidate machinery (unicast mDNS sweep
+ * Saved-hosts only. The earlier candidate machinery (unicast mDNS sweep
  * of the /24 + reduced deep TCP tail) never produced a single host
  * across several hardware rounds — Sunshine's mDNS does not answer unicast queries
  * on the user's LAN, and a blocking TCP sweep cannot work on a console
  * where every connect against an absent address costs the kernel SYN
  * budget (measured: 8 workers, 75.013 s, total=0). What DOES
- * work, every time, is probing the SAVED host: the connect to a live
- * PC returns in milliseconds. The menu seeds the PCs tab from the
- * config instantly; this worker only refines the entry (online status
- * + the PC's hostname). Manual IP entry (Settings) covers the very
- * first run. */
+ * work, every time, is probing KNOWN addresses: connects to live PCs
+ * return in milliseconds. The menu seeds the PCs tab from the saved
+ * list instantly; this worker refines the entries one by one (online
+ * status + each PC's hostname), MRU first, publishing incrementally so
+ * statuses land on screen as they are learned. Manual IP entry (the
+ * Add PC row) covers brand-new machines. */
 static void scan_run_phases(scan_job_t *j) {
     scan_results_t *r = &j->res;
 
-    if (!j->hint_host[0] || !mdns_valid_ipv4(j->hint_host)) {
-        scan_set_phase(r, "No saved PC - enter its IP in Settings");
+    if (j->nprobe == 0) {
+        scan_set_phase(r, "No saved PC - add one with the X row");
         return;
     }
 
-    scan_set_phase(r, "Checking %s", j->hint_host);
-    char name[64] = {0};
-    if (probe_host(j->hint_host, name, sizeof(name))) {
-        pthread_mutex_lock(&j->mtx);
-        scan_add(r, j->hint_host, 47989, name, 1, NULL);
-        pthread_mutex_unlock(&j->mtx);
-    } else {
-        /* Keep the entry (the UI seeded it) but mark it unreachable. */
-        pthread_mutex_lock(&j->mtx);
-        scan_add(r, j->hint_host, 47989, NULL, 0, NULL);
-        pthread_mutex_unlock(&j->mtx);
-        LOGI("scan: %s not answering", j->hint_host);
+    for (int i = 0; i < j->nprobe; i++) {
+        const char *host = j->probe[i];
+        scan_set_phase(r, "Checking %s (%d/%d)", host, i + 1, j->nprobe);
+        char name[64] = {0};
+        if (probe_host(host, name, sizeof(name))) {
+            pthread_mutex_lock(&j->mtx);
+            scan_add(r, host, 47989, name, 1, NULL);
+            pthread_mutex_unlock(&j->mtx);
+        } else {
+            /* Keep the entry (the UI seeded it) but mark it unreachable. */
+            pthread_mutex_lock(&j->mtx);
+            scan_add(r, host, 47989, NULL, 0, NULL);
+            pthread_mutex_unlock(&j->mtx);
+            LOGI("scan: %s not answering", host);
+        }
     }
 }
 
@@ -448,12 +455,21 @@ static void *scan_job_thread(void *arg) {
 }
 
 scan_job_t *scan_job_begin(const char *hint_host) {
+    return hint_host && hint_host[0] ? scan_job_begin_list(&hint_host, 1)
+                                     : scan_job_begin_list(NULL, 0);
+}
+
+scan_job_t *scan_job_begin_list(const char *const *hosts, int n) {
     scan_job_t *j = calloc(1, sizeof(*j));
     if (!j)
         return NULL;
     pthread_mutex_init(&j->mtx, NULL);
-    if (hint_host && hint_host[0] && mdns_valid_ipv4(hint_host))
-        snprintf(j->hint_host, sizeof(j->hint_host), "%s", hint_host);
+    for (int i = 0; i < n && j->nprobe < MDNS_MAX_HOSTS; i++) {
+        if (!hosts[i] || !hosts[i][0] || !mdns_valid_ipv4(hosts[i]))
+            continue;
+        snprintf(j->probe[j->nprobe], sizeof(j->probe[0]), "%s", hosts[i]);
+        j->nprobe++;
+    }
     snprintf(j->res.phase, sizeof(j->res.phase), "Starting scan");
     pthread_t th;
     if (pthread_create(&th, NULL, scan_job_thread, j) == 0) {

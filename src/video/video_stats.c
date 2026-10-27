@@ -12,6 +12,25 @@ static uint64_t now_us(void) {
 static video_stats_t s_stats;
 static pthread_mutex_t s_stats_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Session target fps (overlay budget) + session sequence (one-time
+ * warnings) + drop events for the window-scoped Dropped row. */
+static int s_target_fps;
+static unsigned s_session_seq;
+typedef struct {
+    uint64_t ts_us;
+    unsigned count;
+} drop_event_t;
+static drop_event_t s_drop_events[64];
+static int s_drop_events_head;
+static int s_drop_events_count;
+static pthread_mutex_t s_drop_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void video_stats_set_target_fps(int fps) {
+    pthread_mutex_lock(&s_drop_lock);
+    s_target_fps = fps > 0 && fps <= 240 ? fps : 0;
+    pthread_mutex_unlock(&s_drop_lock);
+}
+
 void video_get_stats(video_stats_t *out) {
     pthread_mutex_lock(&s_stats_lock);
     *out = s_stats;
@@ -71,8 +90,18 @@ void video_stats_add(unsigned long long decode_us, unsigned long long convert_us
         s_stats.dropped += dropped;
     pthread_mutex_unlock(&s_stats_lock);
 
-    if (dropped)
+    if (dropped) {
+        pthread_mutex_lock(&s_drop_lock);
+        drop_event_t *e = &s_drop_events[s_drop_events_head];
+        e->ts_us = now_us();
+        e->count = dropped;
+        s_drop_events_head = (s_drop_events_head + 1) %
+                             (int)(sizeof(s_drop_events) / sizeof(s_drop_events[0]));
+        if (s_drop_events_count < (int)(sizeof(s_drop_events) / sizeof(s_drop_events[0])))
+            s_drop_events_count++;
+        pthread_mutex_unlock(&s_drop_lock);
         return;
+    }
 
     pthread_mutex_lock(&s_live_lock);
     live_sample_t *s = &s_ring[s_ring_head];
@@ -147,6 +176,27 @@ void video_stats_add_net(unsigned long long full_length, unsigned long long recv
 
 void video_stats_get_live(video_live_stats_t *out) {
     memset(out, 0, sizeof(*out));
+    pthread_mutex_lock(&s_drop_lock);
+    out->target_fps = s_target_fps;
+    out->session_seq = s_session_seq;
+    if (s_drop_events_count) {
+        uint64_t window_start2 = now_us() > (uint64_t)VIDEO_STATS_WINDOW_MS * 1000ull
+                                     ? now_us() - (uint64_t)VIDEO_STATS_WINDOW_MS * 1000ull
+                                     : 0;
+        unsigned sum = 0;
+        int oldest2 = (s_drop_events_head - s_drop_events_count +
+                       (int)(sizeof(s_drop_events) / sizeof(s_drop_events[0]))) %
+                      (int)(sizeof(s_drop_events) / sizeof(s_drop_events[0]));
+        for (int i = 0; i < s_drop_events_count; i++) {
+            const drop_event_t *e =
+                &s_drop_events[(oldest2 + i) %
+                               (int)(sizeof(s_drop_events) / sizeof(s_drop_events[0]))];
+            if (e->ts_us >= window_start2)
+                sum += e->count;
+        }
+        out->dropped_window = sum;
+    }
+    pthread_mutex_unlock(&s_drop_lock);
     pthread_mutex_lock(&s_live_lock);
     int n = s_ring_count;
     if (n == 0) {
@@ -212,6 +262,10 @@ void video_stats_get_live(video_live_stats_t *out) {
 /* Called before starting a new session, with the decoder stopped. */
 void video_stats_begin_session(void) {
     video_reset_stats();
+    pthread_mutex_lock(&s_drop_lock);
+    s_session_seq++;
+    s_drop_events_head = s_drop_events_count = 0;
+    pthread_mutex_unlock(&s_drop_lock);
     pthread_mutex_lock(&s_live_lock);
     memset(s_ring, 0, sizeof(s_ring));
     s_ring_head = s_ring_count = 0;

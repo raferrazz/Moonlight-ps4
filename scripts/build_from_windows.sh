@@ -21,8 +21,8 @@ fi
 if [[ ! -f "$HOME/ps4dev/ffmpeg-ps4/lib/libavcodec.a" ]]; then
     scripts/build_ffmpeg_ps4.sh
 fi
-if [[ -f tests/run_host_tests.sh ]]; then
-    bash tests/run_host_tests.sh
+if [[ -f tests/unit/run_all.sh ]]; then
+    bash tests/unit/run_all.sh
 else
     echo "Host tests not included in this checkout; building the client only."
 fi

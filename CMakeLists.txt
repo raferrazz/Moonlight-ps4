@@ -87,6 +87,7 @@ if(PS4)
         src/ui/ui_art.c
         src/ui/ui_menu.c
         src/ui/quick_menu.c
+        src/ui/stream_hud.c
         ${COMMON_SOURCES}
         ${GAMESTREAM_SOURCES}
     )

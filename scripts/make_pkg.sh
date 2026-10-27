@@ -10,7 +10,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TOOLS="$OO_PS4_TOOLCHAIN/bin/linux"
 
 TITLE="Moonlight"
-VERSION="01.55"
+VERSION="01.60"
 TITLE_ID="MLNT00001"
 CONTENT_ID="IV0000-MLNT00001_00-MOONLIGHTPS40000"
 
@@ -21,7 +21,7 @@ STAGE="$OUTDIR/pkg-stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/sce_sys/about" "$STAGE/sce_module" "$STAGE/assets/misc"
 
-# Allowlist only â€” never copy runtime dumps / certs / logs from pkg/assets/misc.
+# Allowlist only - never copy runtime dumps / certs / logs from pkg/assets/misc.
 cp "$REPO_DIR/pkg/sce_sys/icon0.png" "$STAGE/sce_sys/"
 cp "$REPO_DIR/pkg/sce_sys/about/right.sprx" "$STAGE/sce_sys/about/"
 cp "$REPO_DIR/pkg/sce_module/libc.prx" "$STAGE/sce_module/"

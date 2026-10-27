@@ -27,6 +27,9 @@ static int s_prefer_ycbcr = 1;
 static uint64_t s_pts_base;
 static uint64_t s_time_base_us;
 static int s_have_pts_base;
+/* Present-skipping staleness window (see video_stale_window_us); latched
+ * from the session fps at setup. */
+static int64_t s_stale_us = 33000;
 
 static uint64_t now_us(void) {
 #ifdef __ORBIS__
@@ -54,7 +57,7 @@ static enum AVPixelFormat pick_format(AVCodecContext *ctx, const enum AVPixelFor
 
 static int dr_setup(int videoFormat, int width, int height, int redrawRate,
                     void *context, int drFlags) {
-    (void)drFlags; (void)redrawRate;
+    (void)drFlags;
     if (context)
         s_prefer_ycbcr = *(int *)context ? 1 : 0;
 
@@ -65,6 +68,10 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
 
     s_width = width;
     s_height = height;
+    s_stale_us = video_stale_window_us(redrawRate);
+    video_stats_set_target_fps(redrawRate);
+    LOGI("video: stale window %lld us (fps %d)",
+         (long long)s_stale_us, redrawRate);
     s_pts_base = 0;
     s_time_base_us = 0;
     s_have_pts_base = 0;
@@ -160,7 +167,7 @@ static int dr_submit(PDECODE_UNIT du) {
         } else {
             int64_t expected = (int64_t)s_time_base_us +
                                (int64_t)(du->presentationTimeUs - s_pts_base);
-            if ((int64_t)now_us() - expected > 33000)
+            if ((int64_t)now_us() - expected > s_stale_us)
                 skip_present = 1;
         }
     }

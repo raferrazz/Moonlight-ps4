@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <poll.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <fcntl.h>
@@ -44,6 +45,40 @@
 
 static client_identity_t *s_id;
 static int s_verbose;
+
+/* Console field debugging: a PS4 on a LAN with a healthy
+ * Sunshine got deterministic 15 s handshake READ timeouts on every
+ * https://host:47984 request while plain HTTP 47989 answered in ~200 ms
+ * and the identical client code completed full handshakes against every
+ * server variant on the host (TLS 1.2-only, 1.3-only, mTLS,
+ * close-happy). The server-side never sent a byte after our ClientHello.
+ *
+ * Response, in three layers:
+ *  1. DIAGNOSTICS: with s_verbose the mbedTLS debug callback is wired
+ *     into the log, so one console debug.log shows exactly how far each
+ *     handshake got (hello written, record read, alert) instead of a
+ *     bare -0x6800. The negotiated version/cipher is logged on success.
+ *  2. INTEROP FALLBACK: after a SILENT handshake timeout the next
+ *     connection tries the "compat" hello shape - max TLS 1.2, session
+ *     ticket extension off, TCP_NODELAY - the classic GFE-era ClientHello
+ *     every Moonlight client sent for years. Any success clears it, so
+ *     the alternate profile only ever costs the recovery attempt.
+ *  3. ACTIONABLE FAILURE TEXT: a silent port times out with a message
+ *     that names the problem (the PC's secure port is not answering)
+ *     instead of a generic "TLS handshake failed".
+ *
+ * Both profiles are full handshakes; the session cache stays gone. */
+static int s_tls_compat_hint; /* 1 = next conn_open uses the compat hello */
+
+/* mbedTLS debug -> log (levels 0..2: errors, state changes, records). */
+static void tls_dbg_cb(void *ctx, int level, const char *file, int line,
+                       const char *str) {
+    (void)ctx;
+    (void)file;
+    (void)line;
+    if (level <= 2 && str && str[0])
+        LOGI("tls: %s", str);
+}
 
 void http_init(client_identity_t *id, int verbose) {
     s_id = id;
@@ -307,6 +342,13 @@ static int conn_connect(mbedtls_net_context *ctx, const char *host,
         }
 
 connected:
+        /* Request/response latency insurance: never let Nagle hold a
+         * small ClientHello/GET behind a previous segment. Orbis honors
+         * TCP_NODELAY; on stacks without it the setsockopt is a no-op. */
+        {
+            int one = 1;
+            (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        }
         /* Connected: restore blocking mode — the send/recv paths carry
          * their own timeouts, and SO_SNDTIMEO keeps a wedged send from
          * hanging forever. */
@@ -385,6 +427,24 @@ static int conn_open(conn_t *c, const char *host, unsigned short port,
     if (ret != 0)
         goto tls_fail;
 
+    {
+        int compat = s_tls_compat_hint;
+        if (compat) {
+            /* The alternate hello shape (see the s_tls_compat_hint note):
+             * TLS 1.2 max, no session-ticket extension. Deterministically
+             * different bytes on the wire for a server that stayed silent
+             * to the default hello. (Invalid version bounds surface at
+             * mbedtls_ssl_setup, which is error-checked below.) */
+            mbedtls_ssl_conf_max_tls_version(&c->conf,
+                                              MBEDTLS_SSL_VERSION_TLS1_2);
+            mbedtls_ssl_conf_session_tickets(&c->conf,
+                                             MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
+        }
+        LOGI("http: tls profile=%s", compat ? "compat(tls1.2)" : "default");
+        if (s_verbose)
+            mbedtls_ssl_conf_dbg(&c->conf, tls_dbg_cb, NULL);
+    }
+
     // Server certificate is self-signed; real authenticity comes from
     // pairing (signature verification), not PKI.
     mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_NONE);
@@ -421,9 +481,31 @@ static int conn_open(conn_t *c, const char *host, unsigned short port,
     }
     if (ret != 0) {
         pthread_mutex_unlock(&s_tls_lock);
+        if (ret == MBEDTLS_ERR_SSL_TIMEOUT) {
+            /* Silent server: the whole read budget expired without one
+             * byte back. Flip the hello shape for the next connection
+             * (interop insurance) and name the failure for the UI. */
+            s_tls_compat_hint = 1;
+            gs_error = "Your PC is online but its secure port is not "
+                       "answering - restart Sunshine on the PC, then "
+                       "try again";
+            LOGE("http: TLS silent timeout (no response to ClientHello); "
+                 "next connection will try the TLS 1.2 compat profile");
+            goto tls_fail_quiet;
+        }
         goto tls_fail;
     }
     pthread_mutex_unlock(&s_tls_lock);
+    {
+        s_tls_compat_hint = 0; /* this hello shape works: keep it */
+        const char *ver = mbedtls_ssl_get_version(&c->ssl);
+        char ciph[64];
+        mbedtls_ssl_get_ciphersuite(&c->ssl)[0] ?
+            snprintf(ciph, sizeof(ciph), "%s",
+                     mbedtls_ssl_get_ciphersuite(&c->ssl)) :
+            (ciph[0] = '\0');
+        LOGI("http: tls ok %s %s", ver, ciph);
+    }
     return GS_OK;
 
 tls_fail:
@@ -433,6 +515,11 @@ tls_fail:
         LOGE("http: TLS failure: -0x%04x %s", (unsigned)-ret, err);
     }
     gs_error = "TLS handshake failed";
+    return GS_IO_ERROR;
+
+tls_fail_quiet:
+    /* The failure is already logged and gs_error already names the
+     * silent-port condition; keep the duplicate line out of the log. */
     return GS_IO_ERROR;
 }
 

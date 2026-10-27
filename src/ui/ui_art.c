@@ -49,6 +49,43 @@
 #define ART_HOST_MAX 128
 #define ART_FAIL_BACKOFF_MS 2000
 
+/* Square-tile render ladder (Games hero row): TILE_W(208)..HERO_W(448) in
+ * 32 px steps, endpoints pinned - 9 distinct sizes. The row quantizes its
+ * glide-time tile sizes onto this ladder so each (app, size) scaled
+ * render happens ONCE and is then blitted (ui_blit_rgba) every frame;
+ * the original approach resampled ~10 full-resolution tiles per glide
+ * frame through the 64-bit premultiplied bilinear, which held the
+ * console at ~24-32 fps. Worst-case memory: 12 slots x 9 sizes x ~330^2 x 4 B
+ * ~= 46 MB, lazily filled and freed with the slot. */
+#define ART_LADDER_MIN 208
+#define ART_LADDER_MAX 448
+#define ART_LADDER_STEP 32
+#define ART_LADDER_N 9
+
+int ui_art_ladder_snap(int size) {
+    /* Floor to the 32 px grid (endpoint clamps at both ends). Floor, not
+     * ceil: the packed-row geometry spaces tiles by their CONTINUOUS
+     * widths, so a snapped-up tile could overhang its slot and touch its
+     * neighbor mid-glide; snapped-down tiles only make the visual gap
+     * breathe wider, which is invisible at glide speed. The settled row
+     * stays pixel-exact: the endpoints ARE TILE_W (208) and HERO_W
+     * (448), and every far tile sits at exactly TILE_W. */
+    if (size <= ART_LADDER_MIN)
+        return ART_LADDER_MIN;
+    if (size >= ART_LADDER_MAX)
+        return ART_LADDER_MAX;
+    int k = (size - ART_LADDER_MIN) / ART_LADDER_STEP;
+    return ART_LADDER_MIN + k * ART_LADDER_STEP;
+}
+
+static int lad_index(int snapped) {
+    if (snapped == ART_LADDER_MAX)
+        return ART_LADDER_N - 1;
+    if (snapped < ART_LADDER_MIN || snapped > ART_LADDER_MAX)
+        return -1;
+    return (snapped - ART_LADDER_MIN) / ART_LADDER_STEP;
+}
+
 enum { ART_EMPTY = 0, ART_WANTED, ART_READY, ART_FAILED };
 
 static struct {
@@ -56,6 +93,11 @@ static struct {
     unsigned stamp;
     unsigned long long fail_ms; /* FAILED backoff: no refetch storm */
     unsigned char *rgba, *hero;
+    /* Ladder renders (ui_surface format, straight alpha, radius 10 as
+     * drawn by the Games row). Immutable while READY; installed from the
+     * worker (steady endpoints) or lazily from the draw path (sweep
+     * sizes); freed with the slot. */
+    uint32_t *lad[ART_LADDER_N];
 } slots[ART_SLOTS];
 static unsigned s_stamp;
 static unsigned s_arrivals;
@@ -89,13 +131,53 @@ static int landscape_w, landscape_h;
 
 static void art_mkdir(const char *path);
 
+static void art_lad_free(int slot) {
+    for (int k = 0; k < ART_LADDER_N; k++) {
+        free(slots[slot].lad[k]);
+        slots[slot].lad[k] = NULL;
+    }
+}
+
+/* Render one cached ladder tile: scale the source art once into a
+ * straight-alpha buffer (ui_image_render_rgba keeps corner coverage in the
+ * alpha channel, so a later ui_blit_rgba composites exactly like a direct
+ * draw would have - ui_image_round's output cannot be cached because it
+ * bakes coverage into RGB against whatever was underneath). */
+static uint32_t *art_render_scaled(const unsigned char *rgba, int iw, int ih,
+                                   int size, int radius) {
+    uint32_t *buf = malloc((size_t)size * (size_t)size * 4);
+    if (!buf)
+        return NULL;
+    memset(buf, 0, (size_t)size * (size_t)size * 4);
+    ui_image_render_rgba(buf, size, size, rgba, iw, ih, radius);
+    return buf;
+}
+
+static uint32_t *s_land_lad[ART_LADDER_N]; /* landscape ladder renders */
+
 void ui_landscape(ui_surface_t *surface,int x,int y,int w,int h,int radius) {
     if(!landscape) {
         int channels;
         landscape=stbi_load_from_memory(lake_png,sizeof(lake_png),&landscape_w,&landscape_h,&channels,4);
     }
-    if(landscape)ui_image_round(surface,x,y,w,h,landscape,landscape_w,landscape_h,radius);
-    else ui_round_rect(surface,x,y,w,h,radius,ui_theme_current()->panel);
+    if(!landscape){ui_round_rect(surface,x,y,w,h,radius,ui_theme_current()->panel);return;}
+    /* Ladder sizes (the Games row's Desktop tile and the placeholder
+     * cover): blit the cached render instead of resampling the panorama
+     * every glide frame. Filled with the caller's radius (10 from the
+     * row); non-square callers (theme background) use the direct path. */
+    if(w==h&&w>=ART_LADDER_MIN&&w<=ART_LADDER_MAX) {
+        int li=lad_index(ui_art_ladder_snap(w));
+        int size=li==ART_LADDER_N-1?ART_LADDER_MAX:ART_LADDER_MIN+li*ART_LADDER_STEP;
+        if(li>=0) {
+            if(!s_land_lad[li])
+                s_land_lad[li]=art_render_scaled(landscape,landscape_w,landscape_h,size,10);
+            if(s_land_lad[li]) {
+                ui_blit_rgba(surface,x,y,size,size,s_land_lad[li],size);
+                return;
+            }
+        }
+    }
+    ui_image_round(surface,x,y,w,h,landscape,landscape_w,landscape_h,radius);
 }
 
 static unsigned read_be32(const unsigned char *p) {
@@ -208,7 +290,8 @@ static unsigned char *art_fetch(const art_req_t *req, size_t *len) {
 }
 
 static void art_slot_install(int slot, int app_id, unsigned char *rgba, int w, int h,
-                             unsigned char *hero, int hw, int hh) {
+                             unsigned char *hero, int hw, int hh,
+                             uint32_t *lad_small, uint32_t *lad_hero) {
     pthread_mutex_lock(&s_mtx);
     if (slots[slot].state == ART_WANTED && slots[slot].id == app_id) {
         slots[slot].rgba = rgba;
@@ -219,11 +302,15 @@ static void art_slot_install(int slot, int app_id, unsigned char *rgba, int w, i
         slots[slot].hh = hh;
         slots[slot].state = ART_READY;
         slots[slot].stamp = ++s_stamp;
+        slots[slot].lad[0] = lad_small;
+        slots[slot].lad[ART_LADDER_N - 1] = lad_hero;
         s_arrivals++;
     } else {
         /* The UI evicted or re-targeted this slot meanwhile: drop the decode. */
         stbi_image_free(rgba);
         stbi_image_free(hero);
+        free(lad_small);
+        free(lad_hero);
     }
     pthread_mutex_unlock(&s_mtx);
 }
@@ -261,7 +348,13 @@ static void art_load_slot(int slot, const art_req_t *req) {
         pthread_mutex_unlock(&s_mtx);
         return;
     }
-    art_slot_install(slot, req->app_id, rgba, w, h, hero, hw, hh);
+    /* Prewarm the two steady ladder sizes (small tile + hero) on the
+     * worker: the settled row never scales on the draw thread. The
+     * in-between sweep sizes fill lazily on first use (once per app). */
+    uint32_t *lad_small = art_render_scaled(rgba, w, h, ART_LADDER_MIN, 10);
+    uint32_t *lad_hero = art_render_scaled(rgba, w, h, ART_LADDER_MAX, 10);
+    art_slot_install(slot, req->app_id, rgba, w, h, hero, hw, hh,
+                     lad_small, lad_hero);
 }
 
 static void *art_worker_main(void *arg) {
@@ -367,10 +460,15 @@ void ui_art_clear(void) {
     pthread_mutex_lock(&s_mtx);
     stbi_image_free(landscape);
     landscape = NULL;
+    for (int k = 0; k < ART_LADDER_N; k++) {
+        free(s_land_lad[k]);
+        s_land_lad[k] = NULL;
+    }
     for (int i = 0; i < ART_SLOTS; i++) {
         stbi_image_free(slots[i].rgba);
         stbi_image_free(slots[i].hero);
         slots[i].rgba = slots[i].hero = NULL;
+        art_lad_free(i);
         slots[i].id = slots[i].w = slots[i].h = 0;
         slots[i].hw = slots[i].hh = 0;
         slots[i].state = ART_EMPTY;
@@ -392,6 +490,15 @@ void ui_art_draw_round(gs_server_t *server, int app_id, ui_surface_t *surface,
     int claimed = 0; /* this call transitioned a slot to WANTED */
     const unsigned char *rgba = NULL, *hero = NULL;
     int w = 0, h = 0, hw = 0, hh = 0;
+    uint32_t *cached = NULL;
+    int li = -1;
+    /* Square ladder-size draws (the Games row) use the render cache;
+    * every other shape scales directly as before. */
+    if (width == height && width >= ART_LADDER_MIN &&
+        width <= ART_LADDER_MAX) {
+        int snapped = ui_art_ladder_snap(width);
+        li = lad_index(snapped);
+    }
     art_req_t req;
 
     pthread_mutex_lock(&s_mtx);
@@ -407,6 +514,8 @@ void ui_art_draw_round(gs_server_t *server, int app_id, ui_surface_t *surface,
                 hero = slots[i].hero;
                 hw = slots[i].hw;
                 hh = slots[i].hh;
+                if (li >= 0)
+                    cached = slots[i].lad[li];
                 slots[i].stamp = ++s_stamp;
             }
             break;
@@ -440,6 +549,7 @@ void ui_art_draw_round(gs_server_t *server, int app_id, ui_surface_t *surface,
             stbi_image_free(slots[victim].rgba);
             stbi_image_free(slots[victim].hero);
             slots[victim].rgba = slots[victim].hero = NULL;
+            art_lad_free(victim);
             slots[victim].id = app_id;
             slots[victim].w = slots[victim].h = 0;
             slots[victim].hw = slots[victim].hh = 0;
@@ -453,6 +563,39 @@ void ui_art_draw_round(gs_server_t *server, int app_id, ui_surface_t *surface,
         }
     }
     pthread_mutex_unlock(&s_mtx);
+
+    /* Ladder cache: blit the pre-rendered tile. On a miss, render this
+     * (app, size) once off the lock and install it if the slot still
+     * holds the app; the rare OOM falls through to the scaling path.
+     * (The UI thread is the only evictor and the worker only installs
+     * into WANTED slots, so a READY snapshot cannot go stale under
+     * this call - the re-check is defensive.) */
+    if (ready >= 0 && li >= 0 && rgba) {
+        int size = li == ART_LADDER_N - 1 ? ART_LADDER_MAX
+                                          : ART_LADDER_MIN + li * ART_LADDER_STEP;
+        int single_use = 0;
+        if (!cached) {
+            cached = art_render_scaled(rgba, w, h, size, radius);
+            if (cached) {
+                int installed = 0;
+                pthread_mutex_lock(&s_mtx);
+                if (slots[ready].state == ART_READY &&
+                    slots[ready].id == app_id && !slots[ready].lad[li]) {
+                    slots[ready].lad[li] = cached;
+                    installed = 1;
+                }
+                pthread_mutex_unlock(&s_mtx);
+                if (!installed)
+                    single_use = 1; /* another fill won: draw it, drop it */
+            }
+        }
+        if (cached) {
+            ui_blit_rgba(surface, x, y, size, size, cached, size);
+            if (single_use)
+                free(cached);
+            return;
+        }
+    }
 
     if (rgba || hero) {
         if (hero && width*10>height*11)
@@ -478,7 +621,12 @@ void ui_art_draw_round(gs_server_t *server, int app_id, ui_surface_t *surface,
         }
     }
 
-    const ui_theme_t *t = ui_theme_current();
+    /* Placeholder cover: the shared lake panorama (a fixed dark night
+     * scene on every theme) with the monitor pictogram dead-center. The
+     * pictogram is always near-white: tinting it with the theme's text
+     * color made it vanish on light themes (Daylight's dark ink blended
+     * into the lake), and dark themes already draw white ink - one
+     * constant keeps the glyph legible everywhere. */
     ui_landscape(surface,x,y,width,height,radius);
-    ui_icon(surface,x+width/2-40,y+height/2-35,80,0,t->text);
+    ui_icon(surface,x+width/2-40,y+height/2-40,80,0,0xfff4f9ff);
 }

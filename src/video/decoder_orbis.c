@@ -22,6 +22,9 @@
 static videodec2_api_t s_api;
 static OrbisVideodec2Decoder s_dec;
 static int s_width, s_height;
+/* Present-skipping staleness window (see video_stale_window_us); latched
+ * from the session fps at setup. */
+static int64_t s_stale_us = 33000;
 static int s_prefer_ycbcr = 1;
 
 /* One framebuffer per frame Videodec2 may have in flight, carved out of a
@@ -518,6 +521,10 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
     s_width = width;
     s_height = height;
     s_err_streak = 0;
+    s_stale_us = video_stale_window_us(redrawRate);
+    video_stats_set_target_fps(redrawRate);
+    LOGI("orbis: stale window %lld us (fps %d)",
+         (long long)s_stale_us, redrawRate);
 
     s_submits = 0;
     s_diag_start = s_diag_total = s_diag_assembly = s_diag_queue = 0;
@@ -631,7 +638,7 @@ static int dr_submit_impl(PDECODE_UNIT du) {
      * same monotonic clock as Moonlight's enqueue timestamp. */
     uint64_t queue_now = LiGetMicroseconds();
     if (du->enqueueTimeUs && queue_now >= du->enqueueTimeUs &&
-        queue_now - du->enqueueTimeUs > 33000) {
+        queue_now - du->enqueueTimeUs > (uint64_t)s_stale_us) {
         skip_present = 1;
         s_diag_queue_drops++;
     }
@@ -724,7 +731,7 @@ static int dr_submit_impl(PDECODE_UNIT du) {
      * Decode: a frame may age while the hardware callback is running. */
     uint64_t after_decode=LiGetMicroseconds();
     if(!skip_present&&du->enqueueTimeUs&&after_decode>=du->enqueueTimeUs&&
-       after_decode-du->enqueueTimeUs>33000) {
+       after_decode-du->enqueueTimeUs>(uint64_t)s_stale_us) {
         skip_present=1;s_diag_queue_drops++;
     }
 

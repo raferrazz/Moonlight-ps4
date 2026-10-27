@@ -44,15 +44,18 @@ qm_action_t qm_input(unsigned pressed) {
     if (pressed & MENU_BTN_DOWN)
         s_qm.sel = (s_qm.sel + 1) % QM_ROW_COUNT;
 
-    /* Bitrate row: LEFT/RIGHT step the value; CROSS also steps up so the
-     * row is usable one-handed. Clamped to the Settings bounds; whether
-     * the value actually moved is decided at close time (vs. the seed),
-     * so stepping up and back down does not force a reconnect. */
+    /* Bitrate row: LEFT/RIGHT step the value finely, L1/R1 by the big
+     * Settings-row step; CROSS also steps up so the row is usable
+     * one-handed. Clamped to the Settings bounds; whether the value
+     * actually moved is decided at close time (vs. the seed), so stepping
+     * up and back down does not force a reconnect. */
     if (s_qm.sel == QM_ROW_BITRATE) {
-        if (pressed & MENU_BTN_LEFT)
-            s_qm.bitrate = qm_clamp_br(s_qm.bitrate - QM_BITRATE_STEP);
-        if (pressed & MENU_BTN_RIGHT)
-            s_qm.bitrate = qm_clamp_br(s_qm.bitrate + QM_BITRATE_STEP);
+        int step = (pressed & (MENU_BTN_L1 | MENU_BTN_R1)) ? QM_BITRATE_STEP_BIG
+                                                            : QM_BITRATE_STEP;
+        if (pressed & (MENU_BTN_LEFT | MENU_BTN_L1))
+            s_qm.bitrate = qm_clamp_br(s_qm.bitrate - step);
+        if (pressed & (MENU_BTN_RIGHT | MENU_BTN_R1))
+            s_qm.bitrate = qm_clamp_br(s_qm.bitrate + step);
         if (pressed & MENU_BTN_CROSS)
             s_qm.bitrate = qm_clamp_br(s_qm.bitrate + QM_BITRATE_STEP);
     }

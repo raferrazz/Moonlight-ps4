@@ -50,6 +50,32 @@ if [[ ! -f "$FFMPEG_PREFIX/lib/libavcodec.a" ]]; then
     exit 1
 fi
 
+# --- third_party patch guard -------------------------------------------
+# The moonlight-common-c Orbis patches are REQUIRED for streaming: without
+# them the UDP socket workaround (protocol 0 / LC_ADDR_FAMILY) is absent and
+# LiStartConnection dies at name resolution with errno 43 (the failure
+# mode: UI works, every stream start fails). Never build an unpatched
+# tree: verify the marker, try to apply the patches once, then hard-fail.
+MCC="$REPO_DIR/third_party/moonlight-common-c"
+if [[ ! -d "$MCC" ]]; then
+    echo "error: $MCC missing" >&2
+    echo "Run: $REPO_DIR/scripts/setup_deps.sh" >&2
+    exit 1
+fi
+if ! grep -q "LC_ADDR_FAMILY" "$MCC/src/PlatformSockets.h" 2>/dev/null; then
+    echo "build: moonlight-common-c not patched - applying patches"
+    "$REPO_DIR/scripts/apply_patches.sh" || {
+        echo "error: Orbis patches did not apply (tree dirty or pin mismatch?)" >&2
+        echo "       A pkg built from an unpatched tree cannot stream." >&2
+        echo "       Run: $REPO_DIR/scripts/setup_deps.sh" >&2
+        exit 1
+    }
+fi
+if ! grep -q "LC_ADDR_FAMILY" "$MCC/src/PlatformSockets.h" 2>/dev/null; then
+    echo "error: moonlight-common-c patch marker missing after apply" >&2
+    exit 1
+fi
+
 CMAKE_ARGS=(
     -G Ninja
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"

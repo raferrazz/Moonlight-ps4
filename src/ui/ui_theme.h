@@ -5,6 +5,7 @@
 typedef struct {
     const char *name;
     uint32_t bg, panel, selected, accent, text, dim, warn, horizon;
+    uint32_t focus; /* Orbis focus-frame color (white on dark themes) */
 } ui_theme_t;
 void ui_theme_set(int index);
 int ui_theme_index(void);

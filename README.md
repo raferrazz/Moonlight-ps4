@@ -2,21 +2,21 @@
 
 # Moonlight
 
-### Release 1.5.5 · Experimental
+### Release 1.6.0 · Experimental
 
 Stream your PC games to a jailbroken PS4 with Sunshine and a DualShock 4.
 
-![Version](https://img.shields.io/badge/release-1.5.5-36CADB?style=flat-square&labelColor=172B40)
-![Platform](https://img.shields.io/badge/tested-PS4%20%2F%209.00%20%2F%20GoldHEN-0B1525?style=flat-square&labelColor=172B40)
+![Version](https://img.shields.io/badge/release-1.6.0-36CADB?style=flat-square&labelColor=172B40)
+![Platform](https://img.shields.io/badge/tested-PS4%20%2F%2012.50%20%2F%20GoldHEN-0B1525?style=flat-square&labelColor=172B40)
 ![Target](https://img.shields.io/badge/target-1080p60-36CADB?style=flat-square&labelColor=172B40)
 
-<img src="design/console/midnight-games-ps4-01.33.jpg" alt="Moonlight PS4 01.33 Games menu — actual PS4 screenshot" width="800">
+<img src="design/native-preview.gif" alt="Moonlight PS4 — a scroll through the app, rendered by the actual C menu renderer" width="800">
 
-<sub>Captured on an original PS4 running firmware 9.00 with GoldHEN · Midnight theme · Client 01.33.</sub>
+<sub>Rendered by the actual C menu renderer on a development PC · Games, Settings and PCs tabs · Orbis (default) theme.</sub>
 
-**[What's new](#whats-new-in-155)** · **[Install](#installation)** · **[Controls](#controls)** · **[Known issues](#known-issues)**
+**[What's new](#whats-new-in-160)** · **[Install](#installation)** · **[Controls](#controls)** · **[Known issues](#known-issues)**
 
-**[Download PKG](../../releases/download/v1.5.5/Moonlight-PS4-01.55.pkg)** · **[Release notes & checksums](../../releases/tag/v1.5.5)**
+**[Download PKG](../../releases/download/v1.6.0/Moonlight-PS4-01.60.pkg)** · **[Release notes & checksums](../../releases/tag/v1.6.0)**
 
 </div>
 
@@ -24,159 +24,71 @@ Stream your PC games to a jailbroken PS4 with Sunshine and a DualShock 4.
 > affiliated with, endorsed by, or maintained by the official Moonlight project.
 > Product names belong to their respective owners.
 
-> Fully vibe-coded because i suck at coding, but i had problems i wanted fixed in the original app.
+## What's new in 1.6.0
+
+Everything below is new since 1.5.5. The short version: the interface was
+rebuilt in the PS4's own design language, the app remembers every computer
+you play on, the Games row scrolls as smoothly as the dashboard, and
+connecting got faster and more patient.
+
+- **A PS4-style interface from top to bottom.** A header with tabs, a Games
+  row where the highlighted game grows into a large hero tile, system-style
+  notifications, an on-screen keyboard and native launch, pairing and error
+  screens. Six themes
+  restyle all of it, exactly the way PS4 themes work.
+- **Smooth scrolling.** The Games row glides at your display's frame rate
+  and settles quickly, so browsing your library feels like the dashboard.
+- **The app remembers your PCs.** The PCs tab keeps up to 8 computers with
+  live Online/Offline status, one-press Wake-on-LAN and an in-place
+  **Add PC** row. Existing settings carry over automatically.
+- **Faster, more patient connecting.** The PIN screen appears the moment
+  the PC answers, pairing keeps retrying while you enter the PIN, and when
+  something is wrong the app says in plain words what to fix.
+- **5.1 / 7.1 surround sound** through the PS4's HDMI output, with an
+  automatic fallback if your TV or receiver can't play it.
+- **Clearer in-stream feedback.** The performance overlay judges dropped
+  frames against your session's actual frame rate, and the quick menu's
+  bitrate control now takes small steps (bigger jumps on L1/R1).
+- **Smaller fixes:** the controller battery no longer claims a fake 100%,
+  and there is no version popup at startup anymore.
 
 ## What's new in 1.5.5
 
 Everything below is new since 01.35.
 
-### In-stream quick menu
-
-- **Hold L3 + R3 (~2.5 s) while streaming to open the quick menu** — a small
-  panel over the stream with the things you actually change mid-game. A
-  progress ring shows the hold.
-  - *Touchpad mouse* — toggles instantly, saved for the next session.
-  - *Performance overlay* — the live FPS/decode/latency panel.
-  - *Bitrate (kbps)* — LEFT/RIGHT steps in the Settings increments
-    (5,000–50,000); closing the menu with a new value reconnects the stream
-    seamlessly (the game keeps running on the host).
-  - *Quit stream* — back to the client menu, game left running on the PC.
-  - *Quit app on PC* — ends the stream *and* closes the game on the PC (the
-    same request as pressing OPTIONS over a running game in the app list),
-    then returns to the Games list. Moonlight keeps running.
-- **Input is safe while the menu is up.** Passthrough to the host pauses
-  (each pad sends one neutral frame, so the game stops eating held buttons),
-  pad 0 drives the menu, and after closing, passthrough resumes only once
-  each pad reads neutral — nothing held while browsing leaks into the game.
-
-### Controllers and input
-
-- **Local co-op with up to 4 controllers.** Every DualShock 4 that is
-  logged in on the console is forwarded as its own gamepad to the host
-  (P1 blue, P2 red, P3 green, P4 pink lightbars). Pads that join
-  mid-stream are picked up automatically, and a disconnected pad releases
-  its held buttons so characters stop running.
-- **Rumble works.** In-game rumble drives the DS4 motors (low/high
-  frequency, per pad).
-- **Steam's lightbar color now drives the DualShock 4.** When the host
-  (Steam via Sunshine) sets a per-controller lightbar color, the physical
-  DS4 mirrors it. Player colors return automatically when the stream ends.
-- **Touchpad as a mouse.** Drag a finger to move the host cursor, click to
-  left-click, click with two fingers to right-click, and drag two fingers
-  to scroll (smooth high-resolution wheel). Games never see it as a
-  touchpad while mouse mode is on; Settings → *Touchpad mouse* turns it
-  off.
-- **Gyro + accelerometer (motion) support.** Games on the host that
-  request motion input get DS4 IMU reports automatically. Settings →
-  *Gyro motion input* (default on) turns the feature off for titles where
-  motion aiming misbehaves.
-- **Input is polled at 250 Hz while streaming**, shaving ~4 ms of average
-  button-to-host latency.
-
-### Connection and reliability
-
-- **Auto-reconnect on drop.** A mid-stream drop (network blip, Sunshine
-  restart, PC reboot) no longer dumps you into the menu: the game is still
-  running on the PC, so the client shows a "RECONNECTING" screen, tries to
-  resume it three times automatically, then waits with X-to-retry /
-  CIRCLE-for-menu.
-- **Launches answer on screen.** An animated launch screen shows the game's
-  real name, the live step ("Asking your PC to start..."), a spinner and an
-  elapsed counter — and CIRCLE cancels. A handshake failure against a
-  session that is still live host-side cancels the stuck session and
-  relaunches in the same click. Failures stay on the screen with the PC's
-  own error message, X to retry, TRIANGLE to refresh the app list first.
-- **Leaving the app no longer crashes.** The PS4's *Close Application*
-  kills the title in a way no catchable signal or `exit()` path can
-  intercept, which used to show the CE-34878-0 dialog on roughly half of
-  all closes. **Settings → Exit Moonlight** runs the sanctioned title-side
-  exit (`sceSystemServiceLoadExec("exit")`), the SYS_exit override covers
-  the CRT paths, and seven fault handlers convert any in-app fault into a
-  clean exit as well.
-- **Connect failures are named.** "Connection refused" means the PC is
-  reachable but Sunshine is not listening; "connect timeout" means packets
-  go unanswered.
-- **The PCs tab is instant and honest.** Your saved PC is listed the moment
-  the menu opens (zero network), a background `/serverinfo` probe fills in
-  its hostname and an Online/Offline dot, and TRIANGLE re-checks. Subnet
-  discovery sweeps the local network over plain TCP/UDP unicast — the one
-  method that works on this console — instead of multicast mDNS, which the
-  PS4 never receives.
-- **Wake-on-LAN configures itself.** Sunshine tells paired clients the
-  PC's MAC address over HTTPS; the client adopts it automatically (kept
-  fresh if the network card changes) and Settings shows where the value
-  came from ("(auto)"). SQUARE on the PCs tab sends the wake burst, a
-  failed connect auto-sends it, and manual entry remains as a fallback.
-- **The optional Windows Steam companion is gone.** Sunshine alone is the
-  host: the games list comes straight from Sunshine's `/applist`, and no
-  probe to a Windows listener runs (or stalls) anymore.
-
-### Performance
-
-- **The Games list opens instantly.** The application list and cover art
-  are cached on disk and drawn immediately; the network refresh runs in
-  the background and fills the grid a moment later. Art fetch and PNG
-  decode run on a worker thread, fetched once ever instead of once per
-  launch.
-- **No request can stall the app.** On Orbis a TCP connect to a
-  firewall-dropped port blocks for the kernel's full ~75-second SYN
-  budget, and none of the non-blocking modes work. The HTTP layer now
-  splits its locks, bounds every request with its own timeout, pools
-  keep-alive connections, and runs slow work on worker threads — one dead
-  host can no longer freeze the menu or the launch flow.
-- **Full TLS handshakes only.** Sunshine never answers resumed TLS
-  session ClientHellos on the `/launch` path, which could hang every
-  launch attempt for its full 15-second budget. Every connection now pays
-  one ~300 ms full handshake instead.
-- **Faster menu compositing.** Flip buffers are mapped write-combined for
-  the menu path, skipping the per-frame cache flush, and the menu only
-  flips on change instead of redrawing at ~40 fps.
-- **Debug logs keep themselves useful:** every line is timestamped
-  (`[t=12.345]`) and the file log rotates once it passes 1 MB.
-
-### Interface
-
-- **New default theme: Orbis** — the PS4 system look (deep navy gradient,
-  light-blue accent, white text). Six themes ship:
-  **Orbis · Midnight · Mono · Blue Wave · Daylight · Cinema**; existing
-  configurations keep their saved theme.
-- **A sharpness pass over the whole renderer.** Text is baked from a 64 px
-  Carlito master and area-average downscaled (crisp at every size), box
-  art is bilinear with anti-aliased rounded corners, and every icon and
-  button prompt is anti-aliased. The sidebar icons are solid
-  Material-style vector shapes whose cutouts show the live theme
-  gradient.
-- **Settings scrolls.** Twice the text size (30 px labels in 96 px rows)
-  with a scrollable list, an eased follow-the-cursor view, a scrollbar,
-  and a one-line hint that explains the selected row (WOL state, gyro,
-  overlay combo, touchpad gestures, bitrate guidance).
-- **The in-stream UI matches the menu:** the performance overlay is a
-  translucent panel (FPS, pipeline timings, a Network line with wire
-  spread, host latency and measured bitrate, frame-time bars) and the
-  start-of-stream combo hints render as a bottom pill.
-- **Resume when the game is already running.** If the selected app is the
-  one running on the host, the button reads **Resume**.
-- **SQUARE on a game marks it as the default** — the client connects and
-  launches it automatically at boot (CIRCLE cancels into the menu), with
-  the game's real name on the launch screen.
-- **Renamed to just "Moonlight"** — home-screen title, splash, header and
-  logs drop the "PS4" suffix.
-
-### Audio
-
-- **Optional 5.1 surround sound** (Settings → *Surround sound (5.1)*):
-  asks Sunshine for 5.1 audio and plays it through the PS4's 8-channel
-  HDMI output, with an automatic stereo downmix if the TV/AVR refuses
-  8-channel. Experimental: on some receivers the channel order can
-  require a one-line mapping fix.
+- **In-stream quick menu (hold L3 + R3)** — toggle the touchpad mouse and
+  the performance overlay, change the bitrate, or quit the stream while
+  the game keeps running on the PC. Input pauses safely while the menu is
+  open.
+- **Local co-op for up to 4 controllers** — every logged-in DualShock 4
+  becomes its own gamepad on the PC, with rumble, Steam lightbar colors
+  and motion (gyro) input. The touchpad works as a mouse.
+- **Auto-reconnect** — a network blip or a Sunshine restart no longer
+  dumps you into the menu: the client shows a reconnecting screen, tries
+  to resume the running game three times, then waits with X-to-retry.
+- **Animated launch screen with cancel**, connection errors in plain
+  words, and an instant, honest PCs tab (your saved PC is listed
+  immediately, its status dot fills in moments later).
+- **Wake-on-LAN configures itself** after the first connect; SQUARE on
+  the PCs tab sends the wake burst.
+- **Instant games list** — the list and cover art load from cache
+  immediately while the network refresh runs in the background, no
+  network hiccup can freeze the menu, and leaving the app no longer
+  shows a crash dialog (Settings → Exit Moonlight).
+- **A new default theme (Orbis) plus five more**, sharper text and art
+  everywhere, a scrollable Settings page with a helpful hint on every
+  row, 5.1 surround sound, and SQUARE on a game to make it the boot
+  default.
 
 ## Included features
 
 - Local IPv4 discovery (subnet sweep + saved-host probe), manual IP entry
   and PIN pairing.
+- A saved list of up to 8 PCs (most recently used first) with live
+  Online/Offline status and per-PC Wake-on-LAN.
 - Sunshine application list, launch/resume and Desktop streaming.
-- H.264 hardware decoding, stereo (optionally 5.1) Opus audio and
-  DualShock 4 input for up to four pads.
+- H.264 hardware decoding, stereo or 5.1/7.1 surround Opus audio (with an
+  automatic downmix ladder) and DualShock 4 input for up to four pads.
 - Touchpad mouse, motion input, rumble and Steam lightbar mirroring.
 - Wake-on-LAN with auto-detected MAC.
 - In-stream quick menu (hold L3 + R3): toggles, bitrate, quit actions.
@@ -189,30 +101,37 @@ Everything below is new since 01.35.
   button.
 
 <details>
-<summary><strong>Preview the themes</strong></summary>
+<summary><strong>The six themes</strong></summary>
 
-![Splash with the Moonlight logo — native renderer preview](design/native-01.33/midnight-splash.png)
+| Orbis (default) | Midnight |
+| :---: | :---: |
+| ![Games tab — Orbis theme](design/native/orbis-games.png) | ![Games tab — Midnight theme](design/native/midnight-games.png) |
 
-![Themes, splash screens and settings](design/native-themes-preview-01.33.png)
+| Mono | Blue Wave |
+| :---: | :---: |
+| ![Games tab — Mono theme](design/native/mono-games.png) | ![Games tab — Blue Wave theme](design/native/blue-wave-games.png) |
+
+| Daylight | Cinema |
+| :---: | :---: |
+| ![Games tab — Daylight theme](design/native/daylight-games.png) | ![Games tab — Cinema theme](design/native/cinema-games.png) |
 
 </details>
 
 <sub>Images are previews produced by the actual C UI renderer on a development
-PC, not PS4 captures. The previews show the pre-1.5.5 UI; the header image above is
-an actual PS4 screenshot. Game artwork belongs to its respective owners.</sub>
+PC, not PS4 captures. Game artwork in previews is generated placeholder art.</sub>
 
 ## Installation
 
-**Tested setup:** original PS4, firmware **9.00**, GoldHEN, DualShock 4 and an
+**Tested setup:** original PS4, firmware **12.50**, GoldHEN, DualShock 4 and an
 Ethernet-connected PC running [Sunshine](https://github.com/LizardByte/Sunshine).
 The Windows test host uses ViGEmBus for controller emulation.
 
-- **Package:** `Moonlight-PS4-01.55.pkg`
+- **Package:** `Moonlight-PS4-01.60.pkg`
 - **Title ID:** `MLNT00001`
 - **Settings:** `/data/moonlight`
 
 Download the PKG and `SHA256SUMS` from the
-[1.5.5 release](../../releases/tag/v1.5.5).
+[1.6.0 release](../../releases/tag/v1.6.0).
 Build from source using [docs/BUILD.md](docs/BUILD.md).
 
 1. Install the PKG with GoldHEN's Package Installer. It updates an existing
@@ -249,6 +168,16 @@ The physical PS button opens the PS4 system menu. Use the Guide shortcut for Ste
 
 ## Known issues
 
+- **If launching a game does nothing, check the PC's secure port.** One
+  console setup saw every `https://...:47984` request time out silently
+  (the host accepted the connection and then sent nothing) while the app
+  list, pairing status and the plain-HTTP control channel all looked
+  healthy. The fail screen names this condition ("Your PC is online but
+  its secure port is not answering - restart Sunshine on the PC"), logs
+  the full handshake trace with debug logging on, and retries with a
+  classic TLS 1.2 hello shape — but if the port stays silent the host
+  side needs attention (restart Sunshine; verify another Moonlight
+  client can stream from the same network; check what owns port 47984).
 - **Locked 60 FPS is not guaranteed.** An earlier ETS2 Desktop-stream sample
   averaged 58.5 client-reported FPS over about 8.5 minutes, with the final
   minutes near 59.9 FPS. Sunshine captured at 59.94 Hz.
@@ -258,7 +187,7 @@ The physical PS button opens the PS4 system menu. Use the Guide shortcut for Ste
 - The presentation changes introduced in 01.34 need console comparison.
   The apparent sharpening of the picture has not been conclusively
   diagnosed.
-- Compatibility beyond the original PS4 / firmware 9.00 setup is unverified.
+- Compatibility beyond the original PS4 / firmware 12.50 setup is unverified.
 - Discovery currently covers local IPv4; use manual IP if multicast is unavailable.
 - USB keyboard/mouse support and native YCbCr presentation remain unfinished.
 - Steam games appear through Sunshine's application list; the client does not
@@ -271,12 +200,13 @@ Experimental YCbCr plugins are outside the standard installation.
 
 ## Credits
 
-Based on [JaimeJimenezG/Moonlight-ps4](https://github.com/JaimeJimenezG/Moonlight-ps4),
-using [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c),
+Based on [JaimeJimenezG/Moonlight-ps4](https://github.com/JaimeJimenezG/Moonlight-ps4) and its public
+release line [Akryst/Moonlight-ps4](https://github.com/Akryst/Moonlight-ps4), using
+[moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c),
 [OpenOrbis](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain), Sunshine,
 FFmpeg, Opus and mbedTLS. Dependency pins: [third_party/DEPS](third_party/DEPS).
-Font notices: [vendor/FONT-LICENSE.txt](vendor/FONT-LICENSE.txt).
-UI asset provenance: [design/ASSETS_01_31.md](design/ASSETS_01_31.md).
 
-A consolidated top-level license notice remains pending. Existing dependency
-licenses and notices apply.
+Licensed under the [GPL-3.0](LICENSE) — the client statically links
+moonlight-common-c. Third-party licenses and attribution: [NOTICE.md](NOTICE.md).
+Font notices: [vendor/FONT-LICENSE.txt](vendor/FONT-LICENSE.txt).
+UI asset provenance: [design/ASSETS.md](design/ASSETS.md).

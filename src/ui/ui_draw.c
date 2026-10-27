@@ -4,6 +4,7 @@
 #include <string.h>
 #include <math.h>
 #include "ui_font_sans_data.h"
+#include "ui_icon_assets.h"
 
 /* ==========================================================================
  * Rendering quality pass - crisp text and shapes at UI sizes.
@@ -34,10 +35,43 @@ static void pixel(ui_surface_t *s, int x, int y, uint32_t color, unsigned alpha)
     *p = mix_pixel(*p, color, alpha);
 }
 
+/* UTF-8 aware code-point decoder for the baked master. Bytes beyond
+ * ASCII map to pseudo-codes (0x100 + codepoint) for the extras block
+ * baked after the ASCII weights (SANS_ASCII per weight); anything not
+ * baked renders as '?'. */
 static unsigned next_char(const char **text) {
-    unsigned c = (unsigned char)*(*text)++;
-    if (c >= 128) { while (((unsigned char)**text & 0xc0) == 0x80) (*text)++; c = '?'; }
-    return c >= 32 && c <= 126 ? c : '?';
+    const char *p = *text;
+    unsigned c = (unsigned char)*p++;
+    if (c == 0xC2 && (unsigned char)*p == 0xB7) { /* U+00B7 middle dot */
+        p++;
+        c = 0x1B7;
+    } else if (c >= 128) {
+        while (((unsigned char)*p & 0xc0) == 0x80) p++;
+        c = '?';
+    }
+    *text = p;
+    return c;
+}
+
+/* Glyph index in sans_glyphs[]: each weight block is SANS_ASCII ASCII
+ * glyphs followed by SANS_EXTRA extras (same order as EXTRA in
+ * scripts/generate_ui_font.py), regular block first, then bold. */
+static unsigned sans_extra_pos(unsigned c) {
+    switch (c) {
+    case 0x1B7: return 0; /* U+00B7 middle dot */
+    }
+    return 0xFFFFu; /* not baked */
+}
+
+static unsigned sans_index(int bold, unsigned c) {
+    if (c >= 0x100) {
+        unsigned pos = sans_extra_pos(c);
+        if (pos == 0xFFFFu)
+            c = '?';
+        else
+            return (bold ? 2u * SANS_ASCII + SANS_EXTRA : SANS_ASCII) + pos;
+    }
+    return (unsigned)(bold ? SANS_ASCII + SANS_EXTRA : 0) + c - 32;
 }
 
 /* --- text ------------------------------------------------------------------
@@ -87,11 +121,18 @@ static void build_span(span_t *sp, long long idx, long long step, int src_extent
  * per pixel would dominate the hot loop on the Jaguar cores). */
 static unsigned long long s_inv_area;
 
+/* Global label alpha multiplier (0..255). Lets overlay layers fade text
+ * without touching every glyph loop; 255 in the normal menu path. */
+static unsigned s_label_mul = 255;
+void ui_label_set_alpha(int alpha) {
+    s_label_mul = alpha < 0 ? 0 : (alpha > 255 ? 255 : (unsigned)alpha);
+}
+
 static void ui_label_spanned(ui_surface_t *s, int x, int y, int size,
                              int bold, uint32_t color, const char *text,
                              span_t *ysp, int dst_h, long long step) {
     while (*text) {
-        unsigned index = (bold ? 95 : 0) + next_char(&text) - 32;
+        unsigned index = sans_index(bold, next_char(&text));
         int gw = sans_glyphs[index].width;
         const unsigned char *mask = sans_pixels + sans_glyphs[index].offset;
         int dst_w = (gw * size + SANS_PT - 1) / SANS_PT;
@@ -113,6 +154,7 @@ static void ui_label_spanned(ui_surface_t *s, int x, int y, int size,
                 }
                 if (num) {
                     unsigned a = (unsigned)((num * s_inv_area) >> 40);
+                    a = a * s_label_mul / 255;
                     if (a)
                         pixel(s, x + c, y + r, color, a > 255 ? 255 : a);
                 }
@@ -144,10 +186,53 @@ int ui_label_w(int size, int bold, const char *text) {
         return 0;
     while (*text) {
         unsigned c = next_char(&text);
-        width += (sans_glyphs[(bold ? 95 : 0) + c - 32].advance * size +
+        width += (sans_glyphs[sans_index(bold, c)].advance * size +
                   SANS_PT / 2) / SANS_PT;
     }
     return width;
+}
+
+/* See ui_draw.h: the ink core (cap top .. baseline) of the baked Carlito
+ * master spans rows 20..60 (regular) and 19..60 (bold) - measured, not
+ * assumed: scripts/font_ink_metrics.py re-measures the baked master and
+ * fails when a re-bake moves the band. The band is a half-open row range
+ * [top, bot + 1), so its midline sits (top + bot + 1) / 2 master rows
+ * below ui_label()'s y; at `size` px one master row is size / 64 dest
+ * pixels, and rounding to whole pixels keeps the error under half a
+ * pixel at every size the UI renders (18..104). */
+int ui_label_ink_cy(int size, int bold) {
+    if (size < 8)
+        size = 8;
+    /* 2x the midline (half-row exact): regular band 20..60, bold 19..60. */
+    int mid2 = bold ? (19 + 60 + 1) : (20 + 60 + 1);
+    return (mid2 * size + 64) / 128;
+}
+
+int ui_glyph_ink_span(int bold, unsigned code, int *top, int *bot) {
+    if (code >= 128) /* only the ASCII block carries per-glyph metrics */
+        return 0;
+    unsigned gi = sans_index(bold, code);
+    int gw = sans_glyphs[gi].width;
+    const unsigned char *mask = sans_pixels + sans_glyphs[gi].offset;
+    int t = -1, b = -1;
+    for (int r = 0; r < SANS_RH; r++) {
+        const unsigned char *row = mask + (size_t)r * gw;
+        for (int c = 0; c < gw; c++) {
+            if (row[c] > 8) {
+                if (t < 0)
+                    t = r;
+                b = r;
+                break;
+            }
+        }
+    }
+    if (t < 0)
+        return 0;
+    if (top)
+        *top = t;
+    if (bot)
+        *bot = b;
+    return 1;
 }
 
 void ui_label_fit(ui_surface_t *s, int x, int y, int size, int bold, uint32_t color, const char *text, int width) {
@@ -230,7 +315,7 @@ static void ui_ring_aa(ui_surface_t *s, int cx, int cy, float r,
 }
 
 /* Anti-aliased rounded-rect OUTLINE (button keycaps, monitor bezel). */
-static void ui_round_rect_outline_aa(ui_surface_t *s, int x, int y, int w, int h,
+void ui_round_rect_outline_aa(ui_surface_t *s, int x, int y, int w, int h,
                                      int radius, float thickness, uint32_t color) {
     if (radius > w / 2) radius = w / 2;
     if (radius > h / 2) radius = h / 2;
@@ -241,11 +326,14 @@ static void ui_round_rect_outline_aa(ui_surface_t *s, int x, int y, int w, int h
         ui_rect(s, x + w - (int)thickness, y, (int)thickness, h, color);
         return;
     }
-    float half = thickness * 0.5f;
-    float ri = (float)radius - half, ro = (float)radius + half;
+    /* Stroke band [radius - thickness, radius]: INSCRIBED in the box,
+     * exactly like ui_frame. Centering the band on the radius instead
+     * put the arc's midline half a pixel off the straight edges' band,
+     * leaving a visible step at all eight junctions; with the inscribed
+     * band the arc's ends land on the same rows/cols the straight edges
+     * already paint, so the outline closes seamlessly. */
+    float ri = (float)radius - thickness, ro = (float)radius;
     float ri2 = ri * ri, ro2 = ro * ro;
-    int cxr[4] = { x + radius, x + w - radius, x + radius, x + w - radius };
-    int cyr[4] = { y + radius, y + radius, y + h - radius, y + h - radius };
     /* Straight edges (AA against nothing needed: axis-aligned). */
     ui_rect(s, x + radius, y, w - 2 * radius, (int)(thickness + 0.5f), color);
     ui_rect(s, x + radius, y + h - (int)(thickness + 0.5f), w - 2 * radius,
@@ -253,27 +341,31 @@ static void ui_round_rect_outline_aa(ui_surface_t *s, int x, int y, int w, int h
     ui_rect(s, x, y + radius, (int)(thickness + 0.5f), h - 2 * radius, color);
     ui_rect(s, x + w - (int)(thickness + 0.5f), y + radius,
             (int)(thickness + 0.5f), h - 2 * radius, color);
-    /* Corner arcs. */
+    /* Corner arcs. Each arc iterates ONLY its own corner square
+     * (radius x radius): a full ring clipped to the box instead paints
+     * its diagonal segments INSIDE the outline - stray curved strokes
+     * near every corner that read as doubled borders (found by pixel
+     * inspection at the OSK's 106 px / r16 focus ring). */
     for (int k = 0; k < 4; k++) {
-        int ccx = cxr[k], ccy = cyr[k];
-        for (int py = -radius - 1; py <= radius + 1; py++) {
-            for (int px = -radius - 1; px <= radius + 1; px++) {
-                int ax = ccx + px, ay = ccy + py;
-                if (ax >= x + w || ax < x || ay >= y + h || ay < y)
-                    continue;
+        int org_x = (k & 1) ? x + w - radius : x;
+        int org_y = (k & 2) ? y + h - radius : y;
+        int ctr_x = (k & 1) ? x + w - radius : x + radius;
+        int ctr_y = (k & 2) ? y + h - radius : y + radius;
+        for (int py = org_y; py < org_y + radius; py++) {
+            for (int px = org_x; px < org_x + radius; px++) {
                 unsigned cov = 0;
                 for (int sy = 0; sy < 4; sy++) {
                     for (int sx = 0; sx < 4; sx++) {
-                        float fx = (float)ax + (sx * 2 + 1) * 0.125f;
-                        float fy = (float)ay + (sy * 2 + 1) * 0.125f;
-                        float dx = fx - (float)ccx, dy = fy - (float)ccy;
+                        float fx = (float)px + (sx * 2 + 1) * 0.125f;
+                        float fy = (float)py + (sy * 2 + 1) * 0.125f;
+                        float dx = fx - (float)ctr_x, dy = fy - (float)ctr_y;
                         float d2 = dx * dx + dy * dy;
                         if (d2 <= ro2 && d2 >= ri2)
                             cov++;
                     }
                 }
                 if (cov)
-                    pixel(s, ax, ay, color, (cov * 255 + 8) / 16);
+                    pixel(s, px, py, color, (cov * 255 + 8) / 16);
             }
         }
     }
@@ -477,196 +569,192 @@ void ui_focus(ui_surface_t *s, int x, int y, int w, int h, int radius, uint32_t 
     }
 }
 
-/* --- icons (all anti-aliased; the sidebar set is drawn from modern flat-icon
- * references - solid Material-style shapes whose cutouts show the live
- * theme gradient) ----------------------------------------------------------
- * type 0 monitor  1 gamepad  2 badge/details  3 play  4 grid  5 gear
- * type 6 circle   7 cross    8 triangle      9 square   (PS button glyphs) */
+/* --- icons (all anti-aliased) --------------------------------------------
+ * Every pictogram now blits a real asset mask baked by
+ * scripts/embed_ui_icons.py (monitor / gamepad / checkbox pair / close /
+ * performance gauge / settings gear / info badge), area-averaged like
+ * text so the strokes stay crisp at any size. Cutouts simply never emit
+ * ink, so the theme surface underneath shows through cleanly.
+ * type 0 monitor  1 gamepad  2 gauge (live perf)  5 gear
+ * type 6 circle   7 cross    8 triangle      9 square   (PS button chips) */
 
-/* Geometry helpers in a normalized [0,1] icon box (float keeps the shapes
- * legible from 26 px footer glyphs up to the 120 px Desktop tile art). */
-static int in_rrect(float px, float py, float x0, float y0,
-                    float x1, float y1, float r) {
-    if (px < x0 || px > x1 || py < y0 || py > y1) return 0;
-    float qx = px < x0 + r ? x0 + r : (px > x1 - r ? x1 - r : px);
-    float qy = py < y0 + r ? y0 + r : (py > y1 - r ? y1 - r : py);
-    float dx = px - qx, dy = py - qy;
-    return dx * dx + dy * dy <= r * r;
-}
-static int in_circle(float px, float py, float cx, float cy, float r) {
-    float dx = px - cx, dy = py - cy;
-    return dx * dx + dy * dy <= r * r;
-}
+/* Monitor, gamepad, checkbox pair, close, gauge, gear and the info badge
+ * are tintable coverage masks baked from the shipped icon sets
+ * (scripts/embed_ui_icons.py); the button glyphs are the real
+ * PlayStation chips (ui_ps_btn). The vector button/monitor/gamepad code
+ * that used to live here could not match the system shapes - the function
+ * glyphs read generic and the OPTIONS keycap was broken at half the call
+ * sites - so the UI now blits the real assets, area-averaged like text. */
 
-/* Composite a per-pixel coverage function: 4x4 supersampled like the rest
- * of the icon quality pass. Cutouts simply never emit ink, so whatever
- * the theme painted underneath (including the Orbis flow gradient) shows
- * through cleanly on any theme. */
-typedef unsigned (*icon_cov_fn)(float px, float py);
+/* --- coverage-mask blits (icon assets) ---------------------------------- */
 
-static void icon_render(ui_surface_t *s, int x, int y, int size,
-                        uint32_t color, icon_cov_fn cov) {
-    unsigned ink = (color >> 24) & 255;
-    if (!ink || size < 4) return;
-    for (int row = 0; row < size; row++) {
-        if (y + row < 0 || y + row >= s->h) continue;
-        for (int col = 0; col < size; col++) {
-            unsigned hits = 0;
-            for (int sy = 0; sy < 4; sy++)
-                for (int sx = 0; sx < 4; sx++) {
-                    float fx = ((float)col + (sx * 2 + 1) * 0.125f) / (float)size;
-                    float fy = ((float)row + (sy * 2 + 1) * 0.125f) / (float)size;
-                    if (cov(fx, fy)) hits++;
-                }
-            if (hits)
-                pixel(s, x + col, y + row, color, (hits * ink + 8) / 16);
+#define MASK_MAX_DST 160 /* widest mask blit at UI sizes (spans on stack) */
+
+/* Area-average sampler over an 8-bit coverage mask window
+ * (sx,sy,sw,sh inside a mw x mh mask), drawn solid in `color`.
+ * Same fixed-point math as the text path: true box filter when
+ * downscaling, bilinear when upscaling, so chip edges stay crisp at
+ * every size the UI asks for. `mul` fades the whole blit (0..255). */
+static void mask_blit(ui_surface_t *s, int x, int y, int w, int h,
+                      const unsigned char *mask, int mw, int mh,
+                      int sx, int sy, int sw, int sh,
+                      uint32_t color, int mul) {
+    if (!mask || mw <= 0 || mh <= 0 || w <= 0 || h <= 0 || sw <= 0 || sh <= 0)
+        return;
+    if (w > MASK_MAX_DST) w = MASK_MAX_DST;
+    if (h > MASK_MAX_DST) h = MASK_MAX_DST;
+    if (mul < 0) mul = 0;
+    if (mul > 255) mul = 255;
+    long long step_x = ((long long)sw << 16) / w;
+    long long step_y = ((long long)sh << 16) / h;
+    long long area = step_x * step_y; /* Q32.32, exactly the text path */
+    unsigned long long inv = ((1ull << 40) + (unsigned long long)area / 2) /
+                             (unsigned long long)area;
+    span_t ysp[MASK_MAX_DST], xsp[MASK_MAX_DST];
+    for (int r = 0; r < h; r++)
+        build_span(&ysp[r], r, step_y, sh);
+    for (int c = 0; c < w; c++)
+        build_span(&xsp[c], c, step_x, sw);
+    for (int r = 0; r < h; r++) {
+        const span_t *ry = &ysp[r];
+        for (int c = 0; c < w; c++) {
+            const span_t *rx = &xsp[c];
+            long long num = 0;
+            for (int ti = 0; ti < ry->n; ti++) {
+                const unsigned char *mrow =
+                    mask + (size_t)(sy + ry->t[ti]) * mw + sx;
+                long long wy = ry->w[ti];
+                for (int tj = 0; tj < rx->n; tj++)
+                    num += wy * rx->w[tj] * mrow[rx->t[tj]];
+            }
+            if (num) {
+                unsigned a = (unsigned)((num * inv) >> 40);
+                a = a * (unsigned)mul / 255u;
+                if (a)
+                    pixel(s, x + c, y + r, color, a > 255 ? 255 : a);
+            }
         }
     }
 }
 
-/* Monitor: solid bezel with the screen cut out, short neck and a rounded
- * base - the flat "desktop" icon proportions (~9.5% stroke equivalent).
- * the neck reads thin on TV distances; slightly wider than the
- * first cut. */
-static unsigned icon_monitor_cov(float px, float py) {
-    if (in_rrect(px, py, 0.04f, 0.13f, 0.96f, 0.60f, 0.09f)) {
-        if (!in_rrect(px, py, 0.135f, 0.225f, 0.865f, 0.495f, 0.045f))
-            return 1; /* bezel frame around the cut-out screen */
-        return 0;
+void ui_mask_blit(ui_surface_t *s, int x, int y, int w, int h,
+                  const unsigned char *mask, int mw, int mh, uint32_t color) {
+    mask_blit(s, x, y, w, h, mask, mw, mh, 0, 0, mw, mh, color, 255);
+}
+
+/* Shared tight-mask blit: scales the glyph's own bbox into a size-high
+ * box, aspect-true, anchored at (x, y). */
+static void tight_icon(ui_surface_t *s, int x, int y, int size,
+                       const unsigned char *mask, int mw, int mh,
+                       uint32_t color) {
+    int w = (int)((long long)size * mw / mh);
+    mask_blit(s, x, y, w, size, mask, mw, mh, 0, 0, mw, mh, color, 255);
+}
+
+/* PlayStation button chip: the shipped keycap icon (dark body + white
+ * glyph) scaled so the tight chip bbox is exactly `h` pixels tall.
+ * alpha fades the whole chip for disabled hints. */
+void ui_ps_btn(ui_surface_t *s, int x, int y, int h, int btn, int alpha) {
+    if (btn < PSBTN_CIRCLE || btn > PSBTN_TOUCHPAD || h < 6 || h > 256)
+        return;
+    const ps_chip_t *c = &k_ps_chip[btn - PSBTN_CIRCLE];
+    int w = (int)((long long)c->bw * h / c->bh);
+    mask_blit(s, x, y, w, h, c->body, c->w, c->h, c->bx, c->by, c->bw,
+              c->bh, 0xFF0F0E17u, alpha);
+    mask_blit(s, x, y, w, h, c->ink, c->w, c->h, c->bx, c->by, c->bw,
+              c->bh, 0xFFFFFEFFu, alpha);
+}
+
+int ui_ps_btn_w(int h, int btn) {
+    if (btn < PSBTN_CIRCLE || btn > PSBTN_TOUCHPAD || h <= 0)
+        return h;
+    const ps_chip_t *c = &k_ps_chip[btn - PSBTN_CIRCLE];
+    return (int)((long long)c->bw * h / c->bh);
+}
+
+/* PS4-style working spinner: eight dots on a fixed orbit, the fading
+ * trail rotating through them. `frame` is the presented-frame counter;
+ * two frames per step keeps the same ~0.5 s turn as the launch screen. */
+void ui_spinner(ui_surface_t *s, int cx, int cy, int radius, int frame,
+                uint32_t color) {
+    static const int k_dx[8] = {1024, 724, 0, -724, -1024, -724, 0, 724};
+    static const int k_dy[8] = {0, 724, 1024, 724, 0, -724, -1024, -724};
+    if (radius < 8 || radius > 512)
+        return;
+    int slot = (frame >> 1) & 7;
+    int r = radius / 6 + 2;
+    for (int k = 0; k < 8; k++) {
+        int pos = (slot + k) & 7;
+        unsigned a = 255u - (unsigned)k * 28u;
+        int dx = cx + radius * k_dx[pos] / 1024;
+        int dy = cy + radius * k_dy[pos] / 1024;
+        for (int yy = -r; yy <= r; yy++) {
+            for (int xx = -r; xx <= r; xx++) {
+                unsigned hits = 0;
+                for (int sy = 0; sy < 4; sy++) {
+                    for (int sx = 0; sx < 4; sx++) {
+                        float fx = (float)xx + (sx * 2 + 1) * 0.125f;
+                        float fy = (float)yy + (sy * 2 + 1) * 0.125f;
+                        if (fx * fx + fy * fy <= (float)r * r)
+                            hits++;
+                    }
+                }
+                if (hits)
+                    pixel(s, dx + xx, dy + yy, color,
+                          (hits * a + 8) / 16);
+            }
+        }
     }
-    if (in_rrect(px, py, 0.42f, 0.60f, 0.58f, 0.725f, 0.025f)) return 1;
-    if (in_rrect(px, py, 0.26f, 0.725f, 0.74f, 0.825f, 0.05f)) return 1;
-    return 0;
-}
-
-/* Gamepad: dual-grip silhouette (center bar + two grip lobes) with the
- * D-pad cross and the four action buttons cut out. */
-static unsigned icon_gamepad_cov(float px, float py) {
-    int body = in_rrect(px, py, 0.04f, 0.26f, 0.96f, 0.66f, 0.14f) ||
-               in_circle(px, py, 0.175f, 0.565f, 0.175f) ||
-               in_circle(px, py, 0.825f, 0.565f, 0.175f);
-    if (!body) return 0;
-    /* D-pad cross, left */
-    if (in_rrect(px, py, 0.235f, 0.455f, 0.385f, 0.525f, 0.02f) ||
-        in_rrect(px, py, 0.275f, 0.415f, 0.345f, 0.565f, 0.02f))
-        return 0;
-    /* Action-button diamond, right */
-    if (in_circle(px, py, 0.69f, 0.392f, 0.052f) ||
-        in_circle(px, py, 0.788f, 0.49f, 0.052f) ||
-        in_circle(px, py, 0.69f, 0.588f, 0.052f) ||
-        in_circle(px, py, 0.592f, 0.49f, 0.052f))
-        return 0;
-    return 1;
-}
-
-/* Gear: central disc, eight blocky rounded-flank teeth and a through-hole.
- * Teeth span ~54% of the pitch (the first cut was too fine and
- * read as a flower at 26 px). The tooth test runs in the frame of the
- * nearest tooth axis, so every tooth is one rounded rectangle. */
-static unsigned icon_gear_cov(float px, float py) {
-    float dx = px - 0.5f, dy = py - 0.5f;
-    float r2 = dx * dx + dy * dy;
-    if (r2 > 0.47f * 0.47f) return 0;
-    if (r2 <= 0.145f * 0.145f) return 0; /* through-hole */
-    if (r2 <= 0.30f * 0.30f) return 1;   /* central disc */
-    float r = sqrtf(r2);
-    float sector = atan2f(dy, dx) * (4.0f / 3.14159265f); /* 45-degree units */
-    float axis = floorf(sector + 0.5f);
-    float phi = (sector - axis) * 0.78539816f;            /* rad from axis */
-    float lx = r * sinf(phi);   /* tangential offset in the tooth frame */
-    float ly = r * cosf(phi);   /* radial distance */
-    float qx = lx < -0.078f ? -0.078f : (lx > 0.078f ? 0.078f : lx);
-    float qy = ly < 0.295f ? 0.295f : (ly > 0.445f ? 0.445f : ly);
-    float ex = lx - qx, ey = ly - qy;
-    return ex * ex + ey * ey <= 0.022f * 0.022f;
-}
-
-static void icon_monitor(ui_surface_t *s, int x, int y, int size, uint32_t color) {
-    icon_render(s, x, y, size, color, icon_monitor_cov);
-}
-
-static void icon_gamepad(ui_surface_t *s, int x, int y, int size, uint32_t color) {
-    icon_render(s, x, y, size, color, icon_gamepad_cov);
-}
-
-static void icon_gear(ui_surface_t *s, int x, int y, int size, uint32_t color) {
-    icon_render(s, x, y, size, color, icon_gear_cov);
-}
-
-static void icon_grid(ui_surface_t *s, int x, int y, int size, uint32_t color) {
-    int spacing = size / 5 + 1;
-    int r = size / 12 + 1;
-    int mid = size / 2;
-    for (int rr = -1; rr <= 1; rr++)
-        for (int cc = -1; cc <= 1; cc++)
-            ui_circle(s, x + mid + cc * spacing, y + mid + rr * spacing, r, color);
-}
-
-static void icon_badge(ui_surface_t *s, int x, int y, int size, uint32_t color) {
-    /* Ring with four accent ticks (decode-mode / stream details). */
-    ui_ring_aa(s, x + size / 2, y + size / 2, (float)size / 3,
-               (float)(size / 9 + 1), color);
-    int u = size / 12;
-    int c = size / 2;
-    ui_rect(s, x + c - u / 2, y + u, u + 1, u * 2 + 1, color);
-    ui_rect(s, x + c - u / 2, y + size - u * 3, u + 1, u * 2 + 1, color);
-    ui_rect(s, x + u, y + c - u / 2, u * 2 + 1, u + 1, color);
-    ui_rect(s, x + size - u * 3, y + c - u / 2, u * 2 + 1, u + 1, color);
-}
-
-static unsigned icon_play_cov(float px, float py) {
-    /* Solid triangle pointing right in the normalized box. */
-    float ax = 5.0f / 24.0f, ay = 7.0f / 24.0f;
-    float bx = 5.0f / 24.0f, by = 17.0f / 24.0f;
-    float cx = 19.0f / 24.0f, cy = 0.5f;
-    float d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
-    float d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
-    float d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
-    return d1 >= 0 && d2 >= 0 && d3 >= 0;
-}
-
-static void icon_play(ui_surface_t *s, int x, int y, int size, uint32_t color) {
-    icon_render(s, x, y, size, color, icon_play_cov);
 }
 
 void ui_icon(ui_surface_t *s, int x, int y, int size, int type, uint32_t color) {
     if (size < 4)
         return;
-    if (type == 0) {
-        icon_monitor(s, x, y, size, color);
-    } else if (type == 1) {
-        icon_gamepad(s, x, y, size, color);
+    if (type == 0) { /* monitor pictogram - tinted, true 184:168 aspect */
+        int w = (int)((long long)size * ps_mask_monitor_w /
+                      ps_mask_monitor_h);
+        mask_blit(s, x + (size - w) / 2, y, w, size, ps_mask_monitor,
+                  ps_mask_monitor_w, ps_mask_monitor_h, 0, 0,
+                  ps_mask_monitor_w, ps_mask_monitor_h, color, 255);
+    } else if (type == 1) { /* gamepad pictogram */
+        mask_blit(s, x, y, size, size, ps_mask_pad, ps_mask_pad_w,
+                  ps_mask_pad_h, 0, 0, ps_mask_pad_w, ps_mask_pad_h,
+                  color, 255);
     } else if (type == 2) {
-        icon_badge(s, x, y, size, color);
-    } else if (type == 5) { /* settings gear */
-        icon_gear(s, x, y, size, color);
-    } else if (type == 3) {
-        icon_play(s, x, y, size, color);
-    } else if (type == 4) {
-        icon_grid(s, x, y, size, color);
-    } else if (type == 9) { /* square button (controller glyph) */
-        int inset = size / 6;
-        ui_round_rect_outline_aa(s, x + inset, y + inset, size - 2 * inset,
-                                 size - 2 * inset, (size - 2 * inset) / 5,
-                                 (float)(size / 7 + 1), color);
-    } else if (type == 6) { /* circle button */
-        ui_ring_aa(s, x + size / 2, y + size / 2, (float)size / 3,
-                   (float)(size / 7 + 1), color);
-    } else if (type == 7) { /* cross button */
-        int m = size / 4, u = size / 7 + 1;
-        ui_line_aa(s, (float)(x + m), (float)(y + m),
-                   (float)(x + size - m), (float)(y + size - m), (float)u, color);
-        ui_line_aa(s, (float)(x + size - m), (float)(y + m),
-                   (float)(x + m), (float)(y + size - m), (float)u, color);
-    } else if (type == 8) { /* triangle button */
-        int m = size / 5 + 1, u = size / 8 + 1;
-        int cx = x + size / 2;
-        int top = y + m, bl = y + size - m, br = y + size - m;
-        int lx = x + m, rx = x + size - m;
-        ui_line_aa(s, (float)lx, (float)bl, (float)rx, (float)br, (float)u, color);
-        ui_line_aa(s, (float)lx, (float)bl, (float)cx, (float)top, (float)u, color);
-        ui_line_aa(s, (float)rx, (float)br, (float)cx, (float)top, (float)u, color);
+        /* performance gauge (reference asset): aspect-true, centered in
+         * the nominal square so it lines up with the other row icons */
+        int w = (int)((long long)size * ps_mask_gauge_w /
+                      ps_mask_gauge_h);
+        mask_blit(s, x + (size - w) / 2, y, w, size, ps_mask_gauge,
+                  ps_mask_gauge_w, ps_mask_gauge_h, 0, 0, ps_mask_gauge_w,
+                  ps_mask_gauge_h, color, 255);
+    } else if (type == 5) { /* settings gear (reference asset) */
+        tight_icon(s, x, y, size, ps_mask_gear, ps_mask_gear_w,
+                   ps_mask_gear_h, color);
+    } else if (type >= PSBTN_CIRCLE && type <= PSBTN_OPTIONS) {
+        /* legacy button-glyph call sites (hold ring, PIN screen, quick
+         * menu): render the real chip at the size they asked for. */
+        ui_ps_btn(s, x, y, size, type, 255);
     }
+}
+
+/* Close "X" (reference asset): the leave/dismiss pictogram. `size` is
+ * the glyph height; strokes are aspect-true to the shipped icon. */
+void ui_icon_close(ui_surface_t *s, int x, int y, int size, uint32_t color) {
+    if (size < 4)
+        return;
+    tight_icon(s, x, y, size, ps_mask_close, ps_mask_close_w,
+               ps_mask_close_h, color);
+}
+
+/* Info badge (reference asset): solid disc with a knocked-out "i", so
+ * whatever surface it sits on shows through the glyph. Tint with the
+ * caller's accent color. */
+void ui_icon_info(ui_surface_t *s, int cx, int cy, int size, uint32_t color) {
+    if (size < 4)
+        return;
+    tight_icon(s, cx - size / 2, cy - size / 2, size, ps_mask_info,
+               ps_mask_info_w, ps_mask_info_h, color);
 }
 
 void ui_moonlight_logo(ui_surface_t *s,int cx,int cy,int radius,uint32_t color) {
@@ -704,6 +792,144 @@ void ui_circle(ui_surface_t *s, int cx, int cy, int radius, uint32_t argb) {
 void ui_image(ui_surface_t *s, int x, int y, int w, int h,
               const uint8_t *rgba, int iw, int ih) {
     ui_image_round(s,x,y,w,h,rgba,iw,ih,0);
+}
+
+/* Render a scaled tile into a pre-allocated w*h ARGB buffer in STRAIGHT
+ * alpha (ui_surface pixel format): a = bilinear source alpha x rounded
+ * corner coverage, rgb = un-premultiplied color. Same sampling, crop and
+ * corner coverage as ui_image_round() - pixel-for-pixel the same values -
+ * but with the alpha kept unbaked so the result can be cached and later
+ * composited by ui_blit_rgba() exactly like a direct draw would have.
+ * (ui_image_round() itself bakes coverage into RGB by compositing over
+ * the destination, so its output cannot be cached.) Buffer must be
+ * pre-zeroed; untouched pixels stay fully transparent. */
+void ui_image_render_rgba(uint32_t *out, int w, int h,
+                          const uint8_t *rgba, int iw, int ih, int radius) {
+    if (!out || !rgba || w <= 0 || h <= 0 || iw <= 0 || ih <= 0) return;
+    int source_w = iw, source_h = ih;
+    if ((long long)iw * h > (long long)ih * w)
+        source_w = (int)((long long)ih * w / h);
+    else
+        source_h = (int)((long long)iw * h / w);
+    if (source_w < 1) source_w = 1;
+    if (source_h < 1) source_h = 1;
+    int source_x = (iw - source_w) / 2, source_y = (ih - source_h) / 2;
+    int fx_step = (int)(((long long)source_w << 16) / w);
+    int fy_step = (int)(((long long)source_h << 16) / h);
+    if (radius > w / 2) radius = w / 2;
+    if (radius > h / 2) radius = h / 2;
+
+    for (int row = 0; row < h; row++) {
+        uint32_t *dst = out + (size_t)row * (size_t)w;
+        long long fy = (long long)row * fy_step;
+        int sy0 = source_y + (int)(fy >> 16);
+        int sy1 = sy0 + 1 < ih ? sy0 + 1 : sy0;
+        int wty8 = (int)((fy & 0xffff) >> 8);         /* 0..255 */
+        int wby8 = 255 - wty8;
+        int mask_row = 0, cy = 0;
+        if (radius > 0) {
+            if (row < radius) { mask_row = 1; cy = radius; }
+            else if (row >= h - radius) { mask_row = 1; cy = h - radius - 1; }
+        }
+        float ccxl = (float)radius, ccxr = (float)(w - radius - 1);
+        for (int col = 0; col < w; col++) {
+            int outa = 255;
+            if (mask_row) {
+                unsigned cov = 16;
+                if (col < radius) {
+                    cov = circle_cov(col, row, ccxl, (float)cy,
+                                     (float)radius);
+                } else if (col >= w - radius) {
+                    cov = circle_cov(col, row, ccxr, (float)cy,
+                                     (float)radius);
+                }
+                if (!cov)
+                    continue;
+                outa = (cov * 255 + 8) / 16;
+            }
+            long long fx = (long long)col * fx_step;
+            int sx0 = source_x + (int)(fx >> 16);
+            int sx1 = sx0 + 1 < iw ? sx0 + 1 : sx0;
+            int wtx8 = (int)((fx & 0xffff) >> 8);     /* 0..255 */
+            int wrx8 = 255 - wtx8;
+            /* 2x2 bilinear weights in 0..65025 (sum = 65025 = 255*255) */
+            int w00 = wrx8 * wby8, w01 = wtx8 * wby8;
+            int w10 = wrx8 * wty8, w11 = wtx8 * wty8;
+            const uint8_t *p00 = rgba + ((size_t)sy0 * iw + sx0) * 4;
+            const uint8_t *p01 = rgba + ((size_t)sy0 * iw + sx1) * 4;
+            const uint8_t *p10 = rgba + ((size_t)sy1 * iw + sx0) * 4;
+            const uint8_t *p11 = rgba + ((size_t)sy1 * iw + sx1) * 4;
+            unsigned a = ((unsigned)p00[3] * w00 + (unsigned)p01[3] * w01 +
+                          (unsigned)p10[3] * w10 + (unsigned)p11[3] * w11) / 65025u;
+            if (!a)
+                continue;
+            unsigned long long pr = (unsigned long long)p00[0] * p00[3] * w00 +
+                          (unsigned long long)p01[0] * p01[3] * w01 +
+                          (unsigned long long)p10[0] * p10[3] * w10 +
+                          (unsigned long long)p11[0] * p11[3] * w11;
+            unsigned long long pg = (unsigned long long)p00[1] * p00[3] * w00 +
+                          (unsigned long long)p01[1] * p01[3] * w01 +
+                          (unsigned long long)p10[1] * p10[3] * w10 +
+                          (unsigned long long)p11[1] * p11[3] * w11;
+            unsigned long long pb = (unsigned long long)p00[2] * p00[3] * w00 +
+                          (unsigned long long)p01[2] * p01[3] * w01 +
+                          (unsigned long long)p10[2] * p10[3] * w10 +
+                          (unsigned long long)p11[2] * p11[3] * w11;
+            unsigned long long denom = (unsigned long long)a * 65025u;
+            unsigned rr = (unsigned)(pr / denom);
+            unsigned gg = (unsigned)(pg / denom);
+            unsigned bb = (unsigned)(pb / denom);
+            if (rr > 255) rr = 255;
+            if (gg > 255) gg = 255;
+            if (bb > 255) bb = 255;
+            unsigned alpha = a * (unsigned)outa / 255u;
+            if (!alpha)
+                continue;
+            dst[col] = ((uint32_t)alpha << 24) | (rr << 16) | (gg << 8) | bb;
+        }
+    }
+}
+
+/* 1:1 blit of a pre-rendered STRAIGHT-alpha ARGB tile (the format
+ * ui_image_render_rgba produces) with source-over blending that matches
+ * mix_pixel() bit-for-bit, so a cached tile is indistinguishable from a
+ * direct ui_image_round() draw. The Games hero row's raster cache
+ * (ui_art) hands tiles that were scaled ONCE at cache-fill time; a glide
+ * frame then costs a memcpy-class blit per tile instead of a full
+ * bilinear resample per tile, which is what kept the console row under
+ * 60 fps. Fully opaque pixels take the single-write fast path. */
+void ui_blit_rgba(ui_surface_t *s, int x, int y, int w, int h,
+                  const uint32_t *src, int stride) {
+    if (!src || w <= 0 || h <= 0)
+        return;
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w > s->w ? s->w : x + w;
+    int y1 = y + h > s->h ? s->h : y + h;
+    if (x1 <= x0 || y1 <= y0)
+        return;
+    for (int r = y0; r < y1; r++) {
+        uint32_t *dst = (uint32_t *)(void *)(s->fb + (size_t)r * s->pitch) + x0;
+        const uint32_t *sp = src + (size_t)(r - y) * (size_t)stride +
+                             (size_t)(x0 - x);
+        int n = x1 - x0;
+        while (n--) {
+            uint32_t p = *sp++;
+            unsigned a = p >> 24;
+            if (a == 255) {
+                *dst++ = p;
+            } else if (a) {
+                unsigned inv = 255 - a; /* same formula as mix_pixel() */
+                uint32_t d = *dst;
+                *dst++ = 0xff000000u |
+                    (((((d >> 16) & 255) * inv + ((p >> 16) & 255) * a) / 255) << 16) |
+                    (((((d >> 8) & 255) * inv + ((p >> 8) & 255) * a) / 255) << 8) |
+                    (((d & 255) * inv + (p & 255) * a) / 255);
+            } else {
+                dst++;
+            }
+        }
+    }
 }
 
 /* Bilinear image blit with source-alpha compositing and an AA rounded
@@ -860,4 +1086,103 @@ int ui_text_w(int scale, const char *str) {
 void ui_text_fit(ui_surface_t *s, int x, int y, int scale, uint32_t argb,
                  const char *str, int max_width) {
     ui_label_fit(s,x,y,scale < 2 ? 18 : scale * 10,scale >= 4,argb,str,max_width);
+}
+
+/* --- Orbis design-language primitives ----------------------------------- */
+
+/* PS4 focus frame: crisp 1..3px rectangular outline. The reference Orbis
+ * Settings/power menus wrap the focused row in a sharp-cornered white
+ * frame with no fill change - pixel-crisp edges are the look, so no AA
+ * is applied (matching the console's 2px frames at 1080p). */
+void ui_frame(ui_surface_t *s, int x, int y, int w, int h,
+              uint32_t color, int thickness) {
+    if (thickness < 1)
+        thickness = 1;
+    if (thickness > w / 2 || thickness > h / 2)
+        return;
+    ui_rect(s, x, y, w, thickness, color);
+    ui_rect(s, x, y + h - thickness, w, thickness, color);
+    ui_rect(s, x, y + thickness, thickness, h - 2 * thickness, color);
+    ui_rect(s, x + w - thickness, y + thickness, thickness,
+            h - 2 * thickness, color);
+}
+
+/* PS button glyph inside an outlined circle - the function-row shape:
+ * a thin ring with the cross/circle/triangle/square glyph centered in
+ * it, the exact affordance PS4 apps use at the bottom of the screen. */
+/* Tracked all-caps micro label (verb lines, wordmark): uppercases ASCII
+ * inline and adds letter spacing, the Orbis way of marking system
+ * chrome instead of using heavier weights. */
+static void caps_buf(const char *text, char *out, size_t cap) {
+    size_t o = 0;
+    for (const unsigned char *p = (const unsigned char *)text;
+         *p && o + 1 < cap; p++) {
+        unsigned c = *p;
+        if (c >= 'a' && c <= 'z')
+            c -= 'a' - 'A';
+        out[o++] = (char)c;
+    }
+    out[o] = '\0';
+}
+
+void ui_label_caps(ui_surface_t *s, int x, int y, int size, uint32_t color,
+                   const char *text, int tracking_px) {
+    char buf[128];
+    caps_buf(text, buf, sizeof(buf));
+    if (tracking_px <= 0) {
+        ui_label(s, x, y, size, 0, color, buf);
+        return;
+    }
+    for (const char *p = buf; *p; p++) {
+        char one[2] = { *p, 0 };
+        ui_label(s, x, y, size, 0, color, one);
+        x += ui_label_w(size, 0, one) + tracking_px;
+    }
+}
+
+int ui_label_caps_w(int size, const char *text, int tracking_px) {
+    char buf[128];
+    caps_buf(text, buf, sizeof(buf));
+    int w = ui_label_w(size, 0, buf);
+    int n = (int)strlen(buf);
+    if (n > 1)
+        w += (n - 1) * (tracking_px > 0 ? tracking_px : 0);
+    return w;
+}
+
+/* PS4 checkbox: the reference Material pair, blitted as tintable glyph
+ * masks (outline box when off, box + check when on). Both masks share
+ * the same box geometry, so the two states never shift a pixel; the
+ * on-state canvas is a hair wider for Material's check overshoot. */
+void ui_check(ui_surface_t *s, int x, int y, int size, int on,
+              uint32_t color) {
+    if (on)
+        tight_icon(s, x, y, size, ps_mask_checkbox_on,
+                   ps_mask_checkbox_on_w, ps_mask_checkbox_on_h, color);
+    else
+        tight_icon(s, x, y, size, ps_mask_checkbox_off,
+                   ps_mask_checkbox_off_w, ps_mask_checkbox_off_h, color);
+}
+
+/* Chevron arrow for steppers (dir 0 = left, 1 = right). */
+void ui_chevron(ui_surface_t *s, int cx, int cy, int size, int dir,
+                uint32_t color) {
+    int m = size / 3;
+    int u = size / 6 + 1;
+    if (dir == 0) {
+        ui_line_aa(s, (float)(cx + m), (float)(cy - m),
+                   (float)(cx - m), (float)(cy), (float)u, color);
+        ui_line_aa(s, (float)(cx - m), (float)(cy),
+                   (float)(cx + m), (float)(cy + m), (float)u, color);
+    } else {
+        ui_line_aa(s, (float)(cx - m), (float)(cy - m),
+                   (float)(cx + m), (float)(cy), (float)u, color);
+        ui_line_aa(s, (float)(cx + m), (float)(cy),
+                   (float)(cx - m), (float)(cy + m), (float)u, color);
+    }
+}
+
+/* Full-surface dim used behind modal dialogs. */
+void ui_scrim(ui_surface_t *s, uint32_t color, int opacity) {
+    ui_overlay(s, 0, 0, s->w, s->h, color, opacity);
 }

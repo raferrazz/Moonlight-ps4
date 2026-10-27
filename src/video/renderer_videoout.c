@@ -7,6 +7,7 @@
 #include "../orbis/video_out_c.h"
 #include "../ui/ui_draw.h"
 #include "../ui/quick_menu.h"
+#include "../ui/stream_hud.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -1264,17 +1265,15 @@ int video_get_show_stats(void) {
 #define STATS_PANEL_ALPHA 200
 #define HINT_PILL_ALPHA  168
 
-/* Transient combo hint at stream start: shows how to open the quick menu
- * and send the host Guide button. Time-based, once per session (plus a
- * few seconds); drawn as a bottom-center pill. The quit combo is
- * gone (quit lives in the quick menu); two entries remain. */
+/* Combo-hint timing lives here (per-session deadline); the drawing lives
+ * in ui/stream_hud.c so the host harness renders the identical HUD. */
+#define HINT_FADE_MAX 168 /* pill blend alpha at full visibility */
 static uint64_t s_hint_deadline_us; /* 0 = not showing */
 
 void video_show_hint(int seconds) {
     s_hint_deadline_us = seconds > 0 ? now_us() + (uint64_t)seconds * 1000000ull : 0;
 }
 
-/* One hint entry = "KEYS  action"; rendered in a single centered pill. */
 static void draw_hint_overlay(uint8_t *dst) {
     if (!s_hint_deadline_us)
         return;
@@ -1283,282 +1282,102 @@ static void draw_hint_overlay(uint8_t *dst) {
         s_hint_deadline_us = 0;
         return;
     }
-    ui_surface_t s = { dst, s_pitch, s_width, s_buf_h };
-
     /* Fade in the last half second before disappearing. */
-    int alpha = HINT_PILL_ALPHA;
+    int alpha = HINT_FADE_MAX;
     uint64_t left = s_hint_deadline_us - now;
     if (left < 400000ull)
-        alpha = (int)(HINT_PILL_ALPHA * left / 400000ull);
-
-    const char *keys[2] = { "L1 + R1 + OPTIONS", "L3 + R3 (hold)" };
-    const char *acts[2] = { "Guide (PS)", "stream menu" };
-    const int size_k = 21, size_a = 21;
-    int widths[2], total_w = 0;
-    for (int i = 0; i < 2; i++) {
-        widths[i] = ui_label_w(size_k, 1, keys[i]) + 14 +
-                    ui_label_w(size_a, 0, acts[i]);
-        total_w += widths[i] + (i ? 26 : 0);
-    }
-    int ph = 62, py = s_buf_h - ph - 26;
-    int px = (s_width - total_w) / 2;
-    ui_round_rect_alpha(&s, px - 30, py, total_w + 60, ph, ph / 2,
-                        STATS_COL_BG, alpha);
-
-    int x = px;
-    for (int i = 0; i < 2; i++) {
-        ui_label(&s, x, py + (ph - 30) / 2, size_k, 1, STATS_COL_TEXT, keys[i]);
-        x += ui_label_w(size_k, 1, keys[i]) + 14;
-        ui_label(&s, x, py + (ph - 30) / 2, size_a, 0, STATS_COL_DIM, acts[i]);
-        x += ui_label_w(size_a, 0, acts[i]) + 26;
-        if (i < 1) {
-            /* Middle-dot separator. */
-            ui_label(&s, x - 18, py + (ph - 30) / 2, 21, 0,
-                     0xFF55606E, "\xc2\xb7");
-        }
-    }
+        alpha = (int)(HINT_FADE_MAX * left / 400000ull);
+    const stream_hint_t hints[2] = {
+        { "L1 + R1 + OPTIONS", "PS guide" },
+        { "L3 + R3", "Hold for Stream menu" },
+    };
+    ui_surface_t s = { dst, s_pitch, s_width, s_buf_h };
+    stream_hud_hint(&s, hints, 2, alpha);
 }
 
 /* progress ring while the L3+R3 quick-menu hold runs (~2.5 s).
  * The ring is the affordance that makes the hold feel intentional
- * instead of dead. (The old red quit ring is gone with the quit combo.) */
+ * instead of dead. */
 static void draw_hold_overlay(uint8_t *dst) {
     int prog = input_stats_hold_progress();
     if (!prog)
         return;
     ui_surface_t s = { dst, s_pitch, s_width, s_buf_h };
-
-    uint32_t accent = STATS_COL_ACCENT;
-    const char *label = "stream menu";
-
-    int cx = s_width / 2, cy = s_buf_h - 190;
-    int radius = 40, thick = 6;
-    /* Track ring + progress arc. */
-    ui_ring_arc(&s, cx, cy, radius, thick, 0xFF303A46, 0, 1000);
-    ui_ring_arc(&s, cx, cy, radius, thick, accent, 0, prog);
-    /* Center glyph: a PS 'cross' icon (the confirm shape) tinted to match. */
-    ui_icon(&s, cx - 12, cy - 12, 24, 7, accent);
-    int lw = ui_label_w(22, 0, label);
-    ui_label(&s, cx - lw / 2, cy + radius + 16, 22, 0, STATS_COL_TEXT, label);
+    stream_hud_hold(&s, prog);
 }
 
-/* in-stream quick menu (hold L3+R3). Same visual language as the
- * perf overlay: translucent panel, Carlito rows, right-aligned values,
- * accent selection bar. State lives in quick_menu.c (stream thread);
- * this is a pure per-frame view. BGRA present mode only - the menu is
- * gated on that in stream.c (YCbCr pass-through cannot draw overlays).
- */
+/* in-stream quick menu (hold L3+R3): a pure per-frame view of the state
+ * that lives in quick_menu.c (stream thread). BGRA present mode only -
+ * the menu is gated on that in stream.c (YCbCr pass-through cannot draw
+ * overlays). */
 static void draw_quick_menu(uint8_t *dst) {
     qm_view_t m;
     qm_view(&m);
-    if (!m.open)
+    static uint64_t open_us;    /* video thread only (single writer) */
+    static int was_open;
+    if (!m.open) {
+        was_open = 0;
         return;
-    ui_surface_t s = { dst, s_pitch, s_width, s_buf_h };
-
-    static const char *k_labels[QM_ROW_COUNT] = {
-        "Touchpad mouse", "Performance overlay", "Bitrate (kbps)",
-        "Quit stream", "Quit app on PC",
-    };
-
-    const int pw = 620, row_h = 64, pad = 28;
-    const int title_h = 66, foot_h = 44;
-    const int ph = pad + title_h + 10 + row_h * QM_ROW_COUNT + 8 + foot_h + pad;
-    const int px = (s_width - pw) / 2;
-    const int py = (s_buf_h - ph) / 2;
-    ui_round_rect_alpha(&s, px, py, pw, ph, 18, STATS_COL_BG, 236);
-
-    /* Title + accent underline. */
-    ui_label(&s, px + pad, py + pad - 6, 27, 1, STATS_COL_TEXT, "STREAM MENU");
-    ui_rect(&s, px + pad, py + pad + 34, pw - pad * 2, 3, STATS_COL_ACCENT);
-
-    int y = py + pad + title_h + 10;
-    for (int i = 0; i < QM_ROW_COUNT; i++, y += row_h) {
-        int selected = (i == m.sel);
-        if (selected) {
-            ui_round_rect_alpha(&s, px + 14, y - 4, pw - 28, row_h - 4, 10,
-                                0xFF25303C, 236);
-            ui_rect(&s, px + 14, y - 4, 4, row_h - 4, STATS_COL_ACCENT);
-        }
-        uint32_t col = selected ? STATS_COL_TEXT : STATS_COL_DIM;
-        ui_label(&s, px + pad + 8, y + 12, 24, selected ? 1 : 0, col,
-                 k_labels[i]);
-
-        char val[24];
-        const char *vstr = NULL;
-        switch (i) {
-        case QM_ROW_TOUCHPAD:
-            vstr = m.touchpad ? "On" : "Off";
-            break;
-        case QM_ROW_OVERLAY:
-            vstr = m.overlay ? "On" : "Off";
-            break;
-        case QM_ROW_BITRATE:
-            snprintf(val, sizeof(val), "%d  <  >", m.bitrate);
-            vstr = val;
-            break;
-        default:
-            break; /* quit rows: action only, no value */
-        }
-        if (vstr)
-            ui_label(&s, px + pw - pad - 8 - ui_label_w(24, 0, vstr), y + 12,
-                     24, 0, selected ? STATS_COL_ACCENT : STATS_COL_TEXT,
-                     vstr);
     }
-
-    /* Footer: the two verbs + the one side effect worth warning about. */
-    const char *foot = "X select   \xc2\xb7   CIRCLE close   \xc2\xb7   "
-                       "bitrate change reconnects";
-    ui_label(&s, px + (pw - ui_label_w(20, 0, foot)) / 2,
-             py + ph - pad - 22, 20, 0, STATS_COL_DIM, foot);
+    if (!was_open) {
+        open_us = now_us();
+        was_open = 1;
+    }
+    /* ~300 ms ease-out slide from the left edge. */
+    uint64_t el = now_us() - open_us;
+    int reveal = el >= 300000ull ? 1000 : (int)(el * 1000 / 300000ull);
+    ui_surface_t s = { dst, s_pitch, s_width, s_buf_h };
+    stream_hud_quick_menu(&s, &m, reveal);
 }
 
-/* Perf overlay (quick menu, default off): a translucent Carlito panel with the
- * measured pipeline times, the network line (frame wire spread + the
- * host-processing latency Sunshine reports + the measured RX bitrate) and
- * the frame-time bars. Redrawn fresh on every presented frame. */
+/* Perf overlay (quick menu, default off), redrawn on every presented
+ * frame from the rolling window in video_stats.c. */
 static void draw_stats_overlay(uint8_t *dst) {
     video_live_stats_t live;
     video_stats_get_live(&live);
-
     ui_surface_t s = { dst, s_pitch, s_width, s_buf_h };
+    stream_hud_stats(&s, &live);
+}
 
-    const int px = 28, py = 28, pw = 396;
-    const int pad = 24;
-    const int graph_w = pw - pad * 2, graph_h = 44;
-    /* Row budget: header + divider + 5 value rows + graph. */
-    const int header_h = 86;
-    const int row_h = 44;
-    const int ph = pad + header_h + 8 + row_h * 5 + 14 + graph_h + pad;
-    ui_round_rect_alpha(&s, px, py, pw, ph, 16, STATS_COL_BG,
-                        STATS_PANEL_ALPHA);
-    /* Accent edge: a 3px top band inside the rounded corner - matches the
-     * menu's panels without a hard rectangle. */
-    ui_round_rect_alpha(&s, px + 14, py + 10, 44, 3, 1, STATS_COL_ACCENT,
-                        STATS_PANEL_ALPHA);
-    ui_label(&s, px + 68, py + 6, 20, 1, STATS_COL_DIM, "PERFORMANCE");
-
-    /* Header: big FPS reading + stream shape. */
-    char v[96];
-    snprintf(v, sizeof(v), "%.1f", (double)live.fps);
-    ui_label(&s, px + pad, py + 44, 46, 1, STATS_COL_TEXT, v);
-    int vw = ui_label_w(46, 1, v);
-    ui_label(&s, px + pad + vw + 10, py + 66, 22, 0, STATS_COL_DIM, "fps");
-
-    /* Dropped-frame indicator colored by health (60 fps budget).
-     * right-align BOTH header values like the rows below -
-     * left-anchoring them at the panel's inner right edge made the
-     * resolution and the KB/frame strings spill out of the box. */
-    snprintf(v, sizeof(v), "%dx%d", s_width, s_buf_h);
-    int hw = ui_label_w(21, 0, v);
-    ui_label(&s, px + pw - pad - hw, py + 14, 21, 0, STATS_COL_DIM, v);
-    snprintf(v, sizeof(v), "%.0f KB/frame", (double)live.kb_per_frame);
-    hw = ui_label_w(21, 0, v);
-    ui_label(&s, px + pw - pad - hw, py + 58, 21, 0, STATS_COL_DIM, v);
-
-    /* Divider. */
-    ui_overlay(&s, px + pad, py + header_h + 6, pw - pad * 2, 2,
-               0xFF2A3542, 255);
-
-    /* Value rows: label left (dim), value right-aligned (white). */
-    int ty = py + header_h + 18;
-    const int vl = 21, vv = 22;
-    struct { const char *name; char value[64]; uint32_t col; } rows[4];
-    int nrows = 0;
-
-    snprintf(rows[nrows].value, sizeof(rows[nrows].value),
-             "%.1f + %.1f ms", (double)live.decode_ms, (double)live.convert_ms);
-    rows[nrows].name = "Decode + convert";
-    rows[nrows].col = STATS_COL_TEXT;
-    nrows++;
-
-    snprintf(rows[nrows].value, sizeof(rows[nrows].value),
-             "%.1f ms", (double)live.present_ms);
-    rows[nrows].name = "Present";
-    rows[nrows].col = STATS_COL_TEXT;
-    nrows++;
-
-    /* Network line: wire spread + host-side processing latency (when the
-     * host reports it) + the measured encoded-video bitrate. */
-    if (live.host_ms > 0.0f) {
-        snprintf(rows[nrows].value, sizeof(rows[nrows].value),
-                 "recv %.1f ms  host %.1f ms",
-                 (double)live.net_recv_ms, (double)live.host_ms);
-    } else {
-        snprintf(rows[nrows].value, sizeof(rows[nrows].value),
-                 "recv %.1f ms", (double)live.net_recv_ms);
+/* One-time-per-session congestion warning: the moment the Dropped count
+ * in the live window crosses the threshold, the amber pill fades in for
+ * ~4 s and never repeats within the session (the Dropped row of the perf
+ * overlay carries the running count). Latch state is video-thread-local,
+ * keyed on the session sequence so a reconnect re-arms it. */
+static void draw_drop_warning(uint8_t *dst) {
+    video_live_stats_t live;
+    video_stats_get_live(&live);
+    static unsigned warned_seq; /* session the pill already fired in */
+    static uint64_t shown_us;    /* when it fired */
+    if (live.dropped_window >= 8 && warned_seq != live.session_seq) {
+        warned_seq = live.session_seq;
+        shown_us = now_us();
     }
-    rows[nrows].name = "Network";
-    rows[nrows].col = STATS_COL_ACCENT;
-    nrows++;
-
-    snprintf(rows[nrows].value, sizeof(rows[nrows].value),
-             "%.1f Mbps", (double)live.rx_mbps);
-    rows[nrows].name = "Video bitrate";
-    rows[nrows].col = STATS_COL_TEXT;
-    nrows++;
-
-    /* Health row: color by how the feed is keeping up with 60 fps. */
-    float work = live.decode_ms + live.convert_ms + live.present_ms;
-    const char *health_txt;
-    uint32_t health_col;
-    if (live.fps >= 55.0f) {
-        health_txt = "smooth";
-        health_col = STATS_COL_GOOD;
-    } else if (live.fps >= 30.0f) {
-        health_txt = "keeping up";
-        health_col = STATS_COL_WARN;
-    } else {
-        health_txt = "behind";
-        health_col = STATS_COL_BAD;
-    }
-    (void)work;
-    snprintf(rows[nrows].value, sizeof(rows[nrows].value), "%s", health_txt);
-    rows[nrows].name = "Feed";
-    rows[nrows].col = health_col;
-    nrows++;
-
-    for (int i = 0; i < nrows; i++) {
-        int y = ty + i * row_h;
-        ui_label(&s, px + pad, y, vl, 0, STATS_COL_DIM, rows[i].name);
-        int wv = ui_label_w(vv, 1, rows[i].value);
-        ui_label(&s, px + pw - pad - wv, y - 2, vv, 1, rows[i].col,
-                 rows[i].value);
-    }
-
-    /* Frame-time timeline: oldest on the left, most recent on the right. */
-    int gx = px + pad, gy = ty + nrows * row_h + 6;
-    ui_round_rect_alpha(&s, gx, gy, graph_w, graph_h, 8, STATS_COL_GRAPH_BG,
-                        STATS_PANEL_ALPHA);
-
-    float max_ms = 16.7f; /* floor at 60fps so a perfectly smooth feed still shows some bar */
-    for (int i = 0; i < live.frame_count; i++)
-        if (live.frame_ms[i] > max_ms)
-            max_ms = live.frame_ms[i];
-
-    const int bar_w = 2, gap = 1;
-    int nbars = graph_w / (bar_w + gap);
-    if (nbars > live.frame_count)
-        nbars = live.frame_count;
-    int x0 = gx + graph_w - nbars * (bar_w + gap) - 1;
-    for (int i = 0; i < nbars; i++) {
-        int src_idx = live.frame_count - nbars + i;
-        float ms = live.frame_ms[src_idx];
-        int h = (int)(ms / max_ms * (graph_h - 6) + 0.5f);
-        if (h > graph_h - 6) h = graph_h - 6;
-        if (h < 1) h = 1;
-        uint32_t col = STATS_COL_GOOD;
-        if (ms > 33.3f)
-            col = STATS_COL_BAD; /* below 30fps budget */
-        else if (ms > 16.7f)
-            col = STATS_COL_WARN; /* below 60fps budget */
-        ui_rect(&s, x0 + i * (bar_w + gap), gy + graph_h - 3 - h, bar_w, h, col);
-    }
+    if (warned_seq != live.session_seq)
+        return;
+    uint64_t el = now_us() - shown_us;
+    if (el > 4000000ull)
+        return;
+    int alpha = el > 3500000ull
+                    ? (int)(220 - (long long)(el - 3500000ull) * 220 / 500000)
+                    : 220;
+    if (alpha <= 0)
+        return;
+    ui_surface_t s = { dst, s_pitch, s_width, s_buf_h };
+    stream_hud_warning(&s, alpha);
 }
 
 static void present_submit_flip(int next, uint8_t *dst, uint64_t convert_us) {
-    if (s_show_stats && s_use_bgra)
+    qm_view_t qm_now;
+    qm_view(&qm_now);
+    /* The perf panel lives at the top-left corner, exactly where the
+     * quick-menu panel slides in; drawing both stacks the stats under
+     * the menu (visual noise). While the menu is open the console's own
+     * pattern applies: system layer replaces telemetry. */
+    if (s_show_stats && s_use_bgra && !qm_now.open)
         draw_stats_overlay(dst);
     if (s_use_bgra) {
+        draw_drop_warning(dst); /* congestion pill, top center */
         draw_hold_overlay(dst); /* quick-menu hold progress ring */
         draw_hint_overlay(dst);
         draw_quick_menu(dst); /* on top of everything else */

@@ -53,7 +53,7 @@ Thumbs.db
 __pycache__/
 
 # Local testing: suites, fixtures, temporary runs and reports
-/tests/
+# tests/ is tracked on purpose (host harness + units) — keep it in git.
 /testing/
 /test-results/
 /test-reports/
@@ -66,6 +66,7 @@ __pycache__/
 **/*_test.c
 **/*_test.cpp
 **/*_test.py
+!tests/**
 .pytest_cache/
 .tox/
 .nox/

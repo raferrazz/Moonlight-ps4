@@ -670,8 +670,16 @@ static void slot_forward(int slot, const OrbisPadData *pad, unsigned mask,
             (uint8_t)slot, (uint16_t)mask, LI_CTYPE_PS,
             0xFFFFFFFF,
             caps);
-        LiSendControllerBatteryEvent((uint8_t)slot, LI_BATTERY_STATE_FULL,
-                                     100);
+        /* Battery: reported unknown rather than faked full. The pinned
+         * OpenOrbis pad headers (checked against the released v0.5.3 and
+         * v0.5.4 _types/pad.h) carry no battery fields in OrbisPadData,
+         * and the real ScePadData's batteryType/batteryLevel tail sits
+         * beyond the struct size those headers declare - reading it would
+         * walk past a stack object. Fill this in only when an SDK header
+         * exposes the fields (scePadReadState/Ext already provide the
+         * data; the struct layout is the missing piece). */
+        LiSendControllerBatteryEvent((uint8_t)slot, LI_BATTERY_STATE_UNKNOWN,
+                                     LI_BATTERY_PERCENTAGE_UNKNOWN);
         p->announced = 1;
         LOGI("input: announced slot %d to host (mask=0x%x caps=0x%02x)",
              slot, mask, caps);

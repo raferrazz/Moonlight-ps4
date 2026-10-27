@@ -24,15 +24,62 @@ from PIL import Image, ImageDraw, ImageFont
 SANS_PT = 64   # master point size
 SANS_RH = 88   # raster rows per glyph (ascent + descent + headroom)
 
+# Latin-1/punctuation extras the UI copy uses, appended after the 95*2
+# ASCII block. Index mapping: 95*2 + weight*len(EXTRA) + position, where
+# weight is 0 for regular and 1 for bold. ui_draw.c decodes the UTF-8
+# bytes for these code points into pseudo-codes (code + 0x100) and maps
+# them onto this tail block.
+EXTRA = [0x00B7]  # MIDDLE DOT - the "  ·  " separator used in chips/meta
+
+# Carlito (like Calibri) draws the digits 6 and 8 with ink that overshoots
+# the standard figure height by ~10% (top row 15-17 at the 64 px master vs
+# 19-20 for every other digit). At the 104 px PIN size that is a clearly
+# visible size jump, and the PS4 system font uses uniform lining figures.
+# Every digit is therefore re-rendered smaller until its ink fits the
+# figure box measured on '0', then baseline-aligned (ink bottom on the
+# figure baseline) and centered inside the original tabular advance.
+def normalize_digit(image, ch, font_path, ref_top, ref_bot, width):
+    bb = image.getbbox()
+    if not bb:
+        return image
+    ref_h = ref_bot - ref_top
+    if bb[3] - bb[1] <= ref_h:
+        return image
+    size = SANS_PT
+    while size > 8:
+        size -= 1
+        probe = Image.new("L", (width, SANS_RH))
+        ImageDraw.Draw(probe).text((2, 0), ch,
+                                   font=ImageFont.truetype(font_path, size),
+                                   fill=255)
+        bb2 = probe.getbbox()
+        if bb2 and bb2[3] - bb2[1] <= ref_h:
+            out = Image.new("L", (width, SANS_RH))
+            dy = ref_bot - bb2[3]                    # baseline-align
+            dx = (width - (bb2[2] - bb2[0])) // 2 - bb2[0]  # center in advance
+            out.paste(probe.crop(bb2), (max(0, bb2[0] + dx),
+                                       max(0, bb2[1] + dy)))
+            return out
+    return image
+
 root, output = map(Path, sys.argv[1:])
 pixels, glyphs = [], []
 for filename in ("Carlito-Regular.ttf", "Carlito-Bold.ttf"):
-    font = ImageFont.truetype(str(root / filename), SANS_PT)
-    for code in range(32, 127):
+    font_path = root / filename
+    font = ImageFont.truetype(str(font_path), SANS_PT)
+    # figure box measured on '0' (the tabular digit height of this weight)
+    probe = Image.new("L", (SANS_PT * 2, SANS_RH))
+    ImageDraw.Draw(probe).text((2, 0), "0", font=font, fill=255)
+    fb = probe.getbbox()
+    ref_top, ref_bot = fb[1], fb[3]
+    for code in list(range(32, 127)) + EXTRA:
         advance = round(font.getlength(chr(code)))
         width = advance + 4
         image = Image.new("L", (width, SANS_RH))
         ImageDraw.Draw(image).text((2, 0), chr(code), font=font, fill=255)
+        if 0x30 <= code <= 0x39:  # digits: uniform lining-figure height
+            image = normalize_digit(image, chr(code), str(font_path),
+                                    ref_top, ref_bot, width)
         glyphs.append((len(pixels), width, advance))
         pixels.extend(image.tobytes())
 
@@ -42,6 +89,8 @@ lines = [
     " * area-average downsamples it to every request size. */",
     f"#define SANS_PT {SANS_PT}",
     f"#define SANS_RH {SANS_RH}",
+    f"#define SANS_ASCII 95"       " /* glyphs per weight, ASCII 32..126 */",
+    f"#define SANS_EXTRA {len(EXTRA)}" " /* U+" + ", U+".join(f'{c:04X}' for c in EXTRA) + " after each weight */",
     "static const struct { unsigned offset; unsigned short width, advance; } sans_glyphs[] = {",
 ]
 lines += [f"{{{offset},{width},{advance}}}," for offset, width, advance in glyphs]

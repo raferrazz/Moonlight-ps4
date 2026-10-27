@@ -39,7 +39,7 @@
 #define CONFIG_DIR "."
 #endif
 
-#define VERSION_STR "1.5.5"
+#define VERSION_STR "1.6.0"
 
 #ifdef __ORBIS__
 /* Terminate the process with SYS_exit directly. PS4's kernel is FreeBSD 9
@@ -224,7 +224,9 @@ int main(void) {
 #ifdef __ORBIS__
     install_close_handlers();
 #endif
-    LOGN("Moonlight %s", VERSION_STR);
+    /* No boot notification: the version popup on every launch read as
+     * noise. The version still leads debug.log
+     * (the boot line above) so support sessions stay self-identifying. */
     LOGI("moonlight-ps4 %s host=%s debug=%s %dx%d@%d %dkbps",
          VERSION_STR, cfg.host, cfg.debug_host,
          cfg.stream.width, cfg.stream.height, cfg.stream.fps, cfg.stream.bitrate);
@@ -236,7 +238,7 @@ int main(void) {
 
 #ifdef __ORBIS__
     if (cfg.prefer_ycbcr && !video_present_plugin_loaded()) {
-        LOGW("ycbcr_unlock.loaded MISSING â€” YCbCr will fail without GoldHEN plugin");
+        LOGW("ycbcr_unlock.loaded MISSING - YCbCr will fail without GoldHEN plugin");
     } else if (cfg.prefer_ycbcr) {
         LOGI("ycbcr_unlock plugin: marker OK (%s)", ML_YCBCR_PLUGIN_MARKER);
     }
