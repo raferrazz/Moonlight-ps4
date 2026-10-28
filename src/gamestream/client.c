@@ -21,6 +21,13 @@
 #define SIGNATURE_LEN 256
 #define MAX_PLAINCERT 8192
 
+/* Budget for the HTTPS serverinfo probe gs_init runs when the plain-HTTP
+ * view reports unpaired (see gs_init). Short on purpose: a healthy LAN
+ * round trip lands well under one second, while a secure port that never
+ * answers must not park the connect screen - the default budget would
+ * sit in front of the PIN screen for a first-time pairing. */
+#define HTTPS_PROBE_MS 4000
+
 // ---------------------------------------------------------------------------
 // Cryptographic utilities
 // ---------------------------------------------------------------------------
@@ -177,7 +184,9 @@ int gs_mac_from_field(const char *raw, char *out, size_t cap) {
     return 0;
 }
 
-static int load_serverinfo(gs_server_t *server, bool https) {
+/* timeout_ms 0 = the HTTP layer's default budget. */
+static int load_serverinfo_t(gs_server_t *server, bool https,
+                             unsigned timeout_ms) {
     char uuid[37];
     http_resp_t resp;
     int ret = GS_INVALID;
@@ -186,8 +195,12 @@ static int load_serverinfo(gs_server_t *server, bool https) {
     char *mac = NULL;
 
     uuid_v4(server->id, uuid);
-    ret = api_get(server, https, &resp,
-                  "/serverinfo?uniqueid=%s&uuid=%s", GS_UNIQUEID, uuid);
+    if (timeout_ms)
+        ret = api_get_t(server, https, &resp, timeout_ms,
+                        "/serverinfo?uniqueid=%s&uuid=%s", GS_UNIQUEID, uuid);
+    else
+        ret = api_get(server, https, &resp,
+                      "/serverinfo?uniqueid=%s&uuid=%s", GS_UNIQUEID, uuid);
     if (ret != GS_OK)
         return ret;
 
@@ -252,6 +265,10 @@ out:
     return ret;
 }
 
+static int load_serverinfo(gs_server_t *server, bool https) {
+    return load_serverinfo_t(server, https, 0);
+}
+
 int gs_init(gs_server_t *server, client_identity_t *id, const char *address,
             unsigned short httpPort, const char *keydir) {
     (void)keydir;
@@ -272,15 +289,27 @@ int gs_init(gs_server_t *server, client_identity_t *id, const char *address,
          server->paired, server->httpsPort, server->appVersion);
 
     if (!server->paired) {
-        /* Unpaired: skip the HTTPS serverinfo entirely. Sunshine only
-         * serves the full state (Wake-on-LAN MAC included) to PAIRED
-         * HTTPS callers, so the probe can never move this flow forward
-         * - it is pure dead time, and on a host whose secure port is
-         * slow to answer it was 7 s of silent-ClientHello timeout in
-         * front of every PIN screen (observed on console: four
-         * connects in a row, ~10 s each, "the PC feels far away").
-         * Pairing re-fetches serverinfo over HTTPS once it succeeds. */
-        LOGI("gs_init: not paired; skipping HTTPS serverinfo probe");
+        /* The plain-HTTP answer of 0 cannot be trusted as "unpaired":
+         * current Sunshine hardcodes PairStatus=0 in the HTTP serverinfo
+         * for every caller, paired or not - the real state is reported
+         * only over HTTPS, where the request must first pass the
+         * paired-client certificate check performed during the TLS
+         * handshake. A client whose saved certificate is still paired
+         * would otherwise be sent to the PIN screen on every launch
+         * even though the host recognizes it. So ask the secure view
+         * before concluding; success also fills what plain HTTP never
+         * carries (the PC's real MAC for Wake-on-LAN). Any failure -
+         * certificate rejected, HTTP/XML error, or the short budget
+         * expiring on a secure port that never answers - leaves the
+         * HTTP answer in place and the PIN flow runs as before. */
+        LOGI("gs_init: HTTP view says unpaired; probing HTTPS serverinfo");
+        if (load_serverinfo_t(server, true, HTTPS_PROBE_MS) == GS_OK) {
+            LOGI("gs_init: HTTPS OK paired=%d httpsPort=%u",
+                 server->paired, server->httpsPort);
+        } else {
+            LOGW("gs_init: HTTPS probe failed (%s); assuming unpaired",
+                 gs_error ? gs_error : "?");
+        }
     } else if (load_serverinfo(server, true) != GS_OK) {
         /* Paired per the HTTP answer, but the secure port did not
          * answer. Keep the paired state instead of forcing a re-pair:

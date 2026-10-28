@@ -2,11 +2,11 @@
 
 # Moonlight
 
-### Release 1.6.0 · Experimental
+### Release 1.6.1 · Experimental
 
 Stream your PC games to a jailbroken PS4 with Sunshine and a DualShock 4.
 
-![Version](https://img.shields.io/badge/release-1.6.0-36CADB?style=flat-square&labelColor=172B40)
+![Version](https://img.shields.io/badge/release-1.6.1-36CADB?style=flat-square&labelColor=172B40)
 ![Platform](https://img.shields.io/badge/tested-PS4%20%2F%2012.50%20%2F%20GoldHEN-0B1525?style=flat-square&labelColor=172B40)
 ![Target](https://img.shields.io/badge/target-1080p60-36CADB?style=flat-square&labelColor=172B40)
 
@@ -14,15 +14,22 @@ Stream your PC games to a jailbroken PS4 with Sunshine and a DualShock 4.
 
 <sub>Rendered by the actual C menu renderer on a development PC · Games, Settings and PCs tabs · Orbis (default) theme.</sub>
 
-**[What's new](#whats-new-in-160)** · **[Install](#installation)** · **[Controls](#controls)** · **[Known issues](#known-issues)**
+**[What's new](#whats-new-in-161)** · **[Install](#installation)** · **[Controls](#controls)** · **[Known issues](#known-issues)**
 
-**[Download PKG](../../releases/download/v1.6.0/Moonlight-PS4-01.60.pkg)** · **[Release notes & checksums](../../releases/tag/v1.6.0)**
+**[Download PKG](../../releases/download/v1.6.1/Moonlight-PS4-01.61.pkg)** · **[Release notes & checksums](../../releases/tag/v1.6.1)**
 
 </div>
 
 > **Unofficial client:** Moonlight PS4 is independently developed. It is not
 > affiliated with, endorsed by, or maintained by the official Moonlight project.
 > Product names belong to their respective owners.
+
+## What's new in 1.6.1
+
+- **Pair once, not every time.** Opening the app no longer shows the
+  pairing PIN on every launch: after the first successful pairing, starts
+  go straight to your games, including the auto-start game. If the PC
+  ever forgets the console, the PIN screen simply returns.
 
 ## What's new in 1.6.0
 
@@ -126,12 +133,12 @@ PC, not PS4 captures. Game artwork in previews is generated placeholder art.</su
 Ethernet-connected PC running [Sunshine](https://github.com/LizardByte/Sunshine).
 The Windows test host uses ViGEmBus for controller emulation.
 
-- **Package:** `Moonlight-PS4-01.60.pkg`
+- **Package:** `Moonlight-PS4-01.61.pkg`
 - **Title ID:** `MLNT00001`
 - **Settings:** `/data/moonlight`
 
 Download the PKG and `SHA256SUMS` from the
-[1.6.0 release](../../releases/tag/v1.6.0).
+[1.6.1 release](../../releases/tag/v1.6.1).
 Build from source using [docs/BUILD.md](docs/BUILD.md).
 
 1. Install the PKG with GoldHEN's Package Installer. It updates an existing
